@@ -1673,3 +1673,184 @@ func TestJokerLayOffOnEscalera(t *testing.T) {
 		}
 	})
 }
+
+// ─── Joker re-anchor bug regression ──────────────────────────────────────────
+
+// TestJokerReAnchorLayOff is the direct regression for the reported game bug:
+// table escalera was 2♠ 3♠ 4♠ JKR (joker at high end, represents 5♠).
+// Laying off the real 5♠ must cause the joker to slide to the high end
+// representing 6♠ → stored order 2♠ 3♠ 4♠ 5♠ JKR (not 2♠ 3♠ 4♠ JKR 5♠).
+func TestJokerReAnchorLayOff(t *testing.T) {
+	// ─── helper ───────────────────────────────────────────────────────────────
+	assertValidEscalera := func(t *testing.T, meld *Meld, label string) {
+		t.Helper()
+		if err := validateEscaleraSequence(meld.Cards); err != nil {
+			ranks := make([]Rank, len(meld.Cards))
+			for i, c := range meld.Cards {
+				ranks[i] = c.Rank
+			}
+			t.Errorf("%s: stored order %v is not a valid escalera: %v", label, ranks, err)
+		}
+	}
+
+	// ─── Reported bug: 2-3-4-JKR + lay 5 ─────────────────────────────────────
+	t.Run("reported bug: 2-3-4-JKR(=5) + lay 5♠ → 2-3-4-5-JKR(=6)", func(t *testing.T) {
+		m := &Meld{
+			Type:  MeldEscalera,
+			Cards: []Card{c(Two, Spades), c(Three, Spades), c(Four, Spades), joker(0)},
+		}
+		if err := CanLayOffEscalera(m, c(Five, Spades)); err != nil {
+			t.Fatalf("CanLayOffEscalera: unexpected rejection: %v", err)
+		}
+		LayOffEscalera(m, c(Five, Spades))
+
+		wantRanks := []Rank{Two, Three, Four, Five, Joker}
+		if len(m.Cards) != len(wantRanks) {
+			t.Fatalf("len(cards) = %d, want %d", len(m.Cards), len(wantRanks))
+		}
+		for i, want := range wantRanks {
+			if m.Cards[i].Rank != want {
+				got := make([]Rank, len(m.Cards))
+				for j, card := range m.Cards {
+					got[j] = card.Rank
+				}
+				t.Errorf("cards[%d] = %v, want %v; full: %v", i, m.Cards[i].Rank, want, got)
+				break
+			}
+		}
+		assertValidEscalera(t, m, "2-3-4-JKR + 5♠")
+	})
+
+	// ─── Internal-gap joker collision: 5-JKR(=6)-7 + lay 6 ──────────────────
+	t.Run("internal gap 5-JKR(=6)-7 + lay 6♠ → joker re-anchors to high end 5-6-7-JKR", func(t *testing.T) {
+		m := &Meld{
+			Type:  MeldEscalera,
+			Cards: []Card{c(Five, Spades), joker(0), c(Seven, Spades)},
+		}
+		if err := CanLayOffEscalera(m, c(Six, Spades)); err != nil {
+			t.Fatalf("CanLayOffEscalera: unexpected rejection: %v", err)
+		}
+		LayOffEscalera(m, c(Six, Spades))
+
+		// After re-anchor: joker slides to high end → 5-6-7-JKR(=8)
+		wantRanks := []Rank{Five, Six, Seven, Joker}
+		if len(m.Cards) != len(wantRanks) {
+			t.Fatalf("len(cards) = %d, want %d", len(m.Cards), len(wantRanks))
+		}
+		for i, want := range wantRanks {
+			if m.Cards[i].Rank != want {
+				got := make([]Rank, len(m.Cards))
+				for j, card := range m.Cards {
+					got[j] = card.Rank
+				}
+				t.Errorf("cards[%d] = %v, want %v; full: %v", i, m.Cards[i].Rank, want, got)
+				break
+			}
+		}
+		assertValidEscalera(t, m, "5-JKR-7 + 6♠")
+	})
+
+	// ─── Re-anchor impossible at top: Q-K-JKR(=A) + lay A → rejected ─────────
+	t.Run("re-anchor impossible Q-K-JKR(=A) + lay A♠ → rejected", func(t *testing.T) {
+		m := &Meld{
+			Type:  MeldEscalera,
+			Cards: []Card{c(Queen, Spades), c(King, Spades), joker(0)},
+		}
+		// joker represents Ace (14) in ace-high context; maxHigh=14 → cannot go higher.
+		if err := CanLayOffEscalera(m, c(Ace, Spades)); err == nil {
+			t.Error("expected rejection: joker cannot re-anchor beyond Ace")
+		}
+	})
+
+	// ─── Re-anchor impossible at bottom: JKR(=A)-2-3 ace-low + lay A → rejected
+	t.Run("re-anchor impossible JKR(=A)-2-3 ace-low + lay A♣ → rejected", func(t *testing.T) {
+		m := &Meld{
+			Type:  MeldEscalera,
+			Cards: []Card{joker(0), c(Two, Clubs), c(Three, Clubs)},
+		}
+		// joker at low end represents Ace (rank 1-1=0) but wait — Ace is 1 and low
+		// end joker represents minR-1 = 2-1 = 1 = Ace. repRank=1, lowBound=1 → cannot
+		// go lower (repRank <= 1).
+		if err := CanLayOffEscalera(m, c(Ace, Clubs)); err == nil {
+			t.Error("expected rejection: joker cannot re-anchor below Ace in ace-low context")
+		}
+	})
+
+	// ─── CanLayOffEscalera agrees with LayOffEscalera across all fixtures ─────
+	t.Run("CanLayOffEscalera and LayOffEscalera agree on all fixtures", func(t *testing.T) {
+		type fixture struct {
+			name   string
+			meld   func() *Meld
+			card   Card
+			accept bool
+		}
+		fixtures := []fixture{
+			{
+				name: "2-3-4-JKR(=5) + 5♠ accepted + reanchors",
+				meld: func() *Meld {
+					return &Meld{Type: MeldEscalera,
+						Cards: []Card{c(Two, Spades), c(Three, Spades), c(Four, Spades), joker(0)}}
+				},
+				card: c(Five, Spades), accept: true,
+			},
+			{
+				name: "5-JKR(=6)-7 + 6♠ accepted + reanchors",
+				meld: func() *Meld {
+					return &Meld{Type: MeldEscalera,
+						Cards: []Card{c(Five, Spades), joker(0), c(Seven, Spades)}}
+				},
+				card: c(Six, Spades), accept: true,
+			},
+			{
+				name: "Q-K-JKR(=A) + A♠ rejected",
+				meld: func() *Meld {
+					return &Meld{Type: MeldEscalera,
+						Cards: []Card{c(Queen, Spades), c(King, Spades), joker(0)}}
+				},
+				card: c(Ace, Spades), accept: false,
+			},
+			{
+				name: "JKR(=A)-2-3 + A♣ rejected",
+				meld: func() *Meld {
+					return &Meld{Type: MeldEscalera,
+						Cards: []Card{joker(0), c(Two, Clubs), c(Three, Clubs)}}
+				},
+				card: c(Ace, Clubs), accept: false,
+			},
+			{
+				name: "5-6-7 + 8♠ accepted (standard high-end extend)",
+				meld: func() *Meld {
+					return &Meld{Type: MeldEscalera,
+						Cards: []Card{c(Five, Spades), c(Six, Spades), c(Seven, Spades)}}
+				},
+				card: c(Eight, Spades), accept: true,
+			},
+			{
+				name: "5-6-7 + 4♠ accepted (standard low-end extend)",
+				meld: func() *Meld {
+					return &Meld{Type: MeldEscalera,
+						Cards: []Card{c(Five, Spades), c(Six, Spades), c(Seven, Spades)}}
+				},
+				card: c(Four, Spades), accept: true,
+			},
+		}
+
+		for _, fx := range fixtures {
+			t.Run(fx.name, func(t *testing.T) {
+				canErr := CanLayOffEscalera(fx.meld(), fx.card)
+				if fx.accept && canErr != nil {
+					t.Errorf("CanLayOffEscalera unexpected rejection: %v", canErr)
+				}
+				if !fx.accept && canErr == nil {
+					t.Errorf("CanLayOffEscalera expected rejection but got nil")
+				}
+
+				if fx.accept {
+					m := fx.meld()
+					LayOffEscalera(m, fx.card)
+					assertValidEscalera(t, m, fx.name)
+				}
+			})
+		}
+	})
+}

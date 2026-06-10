@@ -495,15 +495,210 @@ func CanLayOffPierna(meld *Meld, card Card) error {
 	return nil
 }
 
-// CanLayOffEscalera checks if a card can be added to either end of an escalera.
-// Joker rules: already placed joker is fixed; a new joker can be added only if
+// jokerRepresentedRank returns the rank (as an int, ace-high adjusted when
+// applicable) that the single joker in meld currently represents, and a bool
+// indicating whether the meld contains a joker at all.
+//
+// Design note: the represented rank is derived positionally each time rather
+// than stored on the Meld struct. This keeps the data model simple — a Meld is
+// just an ordered []Card — and the derivation is O(n) and always consistent
+// with the stored card order. Any lay-off that reorders cards (re-anchor) also
+// corrects the positional derivation automatically.
+func jokerRepresentedRank(meld *Meld) (rank int, aceHigh bool, hasJoker bool) {
+	// Find the joker index and collect non-joker ranks.
+	jokerIdx := -1
+	nonJokerRanks := make([]int, 0, len(meld.Cards))
+	for i, c := range meld.Cards {
+		if c.IsJoker() {
+			jokerIdx = i
+		} else {
+			nonJokerRanks = append(nonJokerRanks, int(c.Rank))
+		}
+	}
+	if jokerIdx == -1 {
+		return 0, false, false
+	}
+
+	// Determine ace-high context.
+	for _, r := range nonJokerRanks {
+		if r == int(King) {
+			aceHigh = true
+			break
+		}
+	}
+
+	// Adjust aces.
+	adjusted := make([]int, len(nonJokerRanks))
+	copy(adjusted, nonJokerRanks)
+	if aceHigh {
+		for i, r := range adjusted {
+			if r == int(Ace) {
+				adjusted[i] = 14
+			}
+		}
+	}
+
+	sort.Ints(adjusted)
+
+	// Look for an internal gap first.
+	for i := 1; i < len(adjusted); i++ {
+		if adjusted[i]-adjusted[i-1] == 2 {
+			return adjusted[i-1] + 1, aceHigh, true
+		}
+	}
+
+	// No internal gap: joker is at an end.
+	// Joker at low end (index 0) → represents adjusted[0]-1.
+	// Joker at high end (last) → represents adjusted[len-1]+1.
+	if jokerIdx == 0 {
+		return adjusted[0] - 1, aceHigh, true
+	}
+	return adjusted[len(adjusted)-1] + 1, aceHigh, true
+}
+
+// reanchorResult describes what reAnchorJoker computed.
+type reanchorResult int
+
+const (
+	reanchorNotNeeded  reanchorResult = iota // card does not collide with joker
+	reanchorOK                               // joker was successfully re-anchored
+	reanchorImpossible                       // joker cannot re-anchor (boundary hit)
+)
+
+// reAnchorJoker handles the case where the card being laid off is exactly the
+// rank the meld's joker currently represents. The joker is "displaced" by the
+// real card and must slide to the nearest available end:
+//
+//   - If the joker is at the high end (last card), it tries to move one step
+//     further high (joker represents highRep+1). If that rank exceeds the
+//     natural ceiling (13, or 14 for ace-high), the lay-off is rejected.
+//   - If the joker is at the low end (first card), it tries to move one step
+//     further low (joker represents lowRep-1). If that rank is below 1, rejected.
+//   - If the joker is internal (gap-filler), the displaced joker is placed at
+//     the nearer end (high preferred, consistent with the existing convention).
+//     If that end is at the boundary, the low end is tried; if both are at
+//     boundaries, the lay-off is rejected.
+//
+// On success the meld is mutated in place (the joker moves, the real card takes
+// its original position) and reanchorOK is returned.
+func reAnchorJoker(meld *Meld, card Card) reanchorResult {
+	repRank, aceHigh, hasJoker := jokerRepresentedRank(meld)
+	if !hasJoker {
+		return reanchorNotNeeded
+	}
+
+	// Determine effective rank of the incoming card.
+	incoming := int(card.Rank)
+	if aceHigh && incoming == int(Ace) {
+		incoming = 14
+	}
+
+	if incoming != repRank {
+		return reanchorNotNeeded
+	}
+
+	// The card collides with the joker. Re-anchor.
+	maxHigh := 13
+	if aceHigh {
+		maxHigh = 14
+	}
+
+	// Locate joker position.
+	jokerIdx := -1
+	for i, c := range meld.Cards {
+		if c.IsJoker() {
+			jokerIdx = i
+			break
+		}
+	}
+	jokerCard := meld.Cards[jokerIdx]
+
+	// Build the new card slice: real card at joker's old position.
+	newCards := make([]Card, len(meld.Cards))
+	copy(newCards, meld.Cards)
+	newCards[jokerIdx] = card
+
+	last := len(newCards) - 1
+
+	switch {
+	case jokerIdx == last:
+		// Joker was at the high end. Try to push it one step higher.
+		if repRank >= maxHigh {
+			return reanchorImpossible
+		}
+		// Append joker at the new high end.
+		meld.Cards = append(newCards, jokerCard)
+		return reanchorOK
+
+	case jokerIdx == 0:
+		// Joker was at the low end. Try to push it one step lower.
+		if repRank <= 1 {
+			return reanchorImpossible
+		}
+		// Prepend joker at the new low end.
+		meld.Cards = append([]Card{jokerCard}, newCards...)
+		return reanchorOK
+
+	default:
+		// Joker was internal. Prefer the high end; fall back to the low end.
+		// Determine current boundaries from newCards (joker removed).
+		nonJokerRanks := make([]int, 0, len(newCards))
+		for _, c := range newCards {
+			if !c.IsJoker() {
+				nonJokerRanks = append(nonJokerRanks, int(c.Rank))
+			}
+		}
+		sort.Ints(nonJokerRanks)
+		highEnd := nonJokerRanks[len(nonJokerRanks)-1]
+		lowEnd := nonJokerRanks[0]
+
+		canGoHigh := highEnd < maxHigh
+		canGoLow := lowEnd > 1
+
+		switch {
+		case canGoHigh:
+			meld.Cards = append(newCards, jokerCard)
+			return reanchorOK
+		case canGoLow:
+			meld.Cards = append([]Card{jokerCard}, newCards...)
+			return reanchorOK
+		default:
+			return reanchorImpossible
+		}
+	}
+}
+
+// CanLayOffEscalera checks if a card can be added to either end of an escalera,
+// or if it can displace the joker (re-anchor). A new joker can be added only if
 // the escalera has no joker yet.
 func CanLayOffEscalera(meld *Meld, card Card) error {
 	if meld.Type != MeldEscalera {
 		return errors.New("la combinación no es una escalera")
 	}
 
-	// Build trial cards at low end and high end.
+	// Check whether the card collides with the joker's represented rank.
+	// If so, validate the re-anchor outcome rather than naive end-extension.
+	if !card.IsJoker() {
+		repRank, aceHigh, hasJoker := jokerRepresentedRank(meld)
+		if hasJoker {
+			incoming := int(card.Rank)
+			if aceHigh && incoming == int(Ace) {
+				incoming = 14
+			}
+			if incoming == repRank {
+				// Simulate re-anchor without mutating.
+				clone := &Meld{Type: meld.Type, Cards: make([]Card, len(meld.Cards))}
+				copy(clone.Cards, meld.Cards)
+				result := reAnchorJoker(clone, card)
+				if result == reanchorOK {
+					return nil
+				}
+				return errors.New("el comodín no se puede desplazar — no hay lugar en la escalera")
+			}
+		}
+	}
+
+	// Standard end-extension check (no joker collision).
 	lowTrial := append([]Card{card}, meld.Cards...)
 	highTrial := append(append([]Card{}, meld.Cards...), card)
 
@@ -516,14 +711,24 @@ func CanLayOffEscalera(meld *Meld, card Card) error {
 	return errors.New("la carta no puede extender esta escalera")
 }
 
-// LayOffEscalera adds a card to the correct end of an escalera in-place.
+// LayOffEscalera adds a card to the correct end of an escalera in-place,
+// or re-anchors the joker when the card displaces it.
 // Placement is determined by comparing the card's effective rank against the
 // meld's boundary ranks, not by re-running sequence validation (which sorts
 // ranks internally and cannot distinguish high from low placement).
 func LayOffEscalera(meld *Meld, card Card) {
-	// Determine the effective low and high boundary ranks of the existing meld.
-	// Use ace-high (rank 14) when the meld ends with an ace or a joker
-	// placeholder that sits after a King.
+	// Re-anchor joker if the incoming card is exactly the rank it represents.
+	if !card.IsJoker() {
+		if result := reAnchorJoker(meld, card); result != reanchorNotNeeded {
+			// reAnchorJoker already mutated meld.Cards on success.
+			// On reanchorImpossible, CanLayOffEscalera should have caught this.
+			return
+		}
+	}
+
+	// Standard end-extension: determine the effective low and high boundary
+	// ranks of the existing meld. Use ace-high (rank 14) when the meld ends
+	// with an ace or a joker placeholder that sits after a King.
 	lowBound, highBound := meldBoundaryRanks(meld)
 
 	cardRank := effectiveRank(card, lowBound, highBound)
