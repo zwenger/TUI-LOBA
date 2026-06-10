@@ -47,10 +47,11 @@ type Command struct {
 // ─── Event types (server → client) ───────────────────────────────────────────
 
 const (
-	EvtState   = "state"
-	EvtError   = "error"
-	EvtMessage = "message"
-	EvtSeats   = "seats" // server→client: list of available disconnected seats
+	EvtState        = "state"
+	EvtError        = "error"
+	EvtMessage      = "message"
+	EvtSeats        = "seats"         // server→client: list of available disconnected seats
+	EvtNameRequired = "name_required" // server→client: lobby join had empty name, ask for one
 )
 
 // CardView is a client-visible representation of a card.
@@ -83,6 +84,9 @@ type PlayerView struct {
 	Connected  bool   `json:"connected"`
 	IsActive   bool   `json:"is_active"`
 	IsSelf     bool   `json:"is_self"`
+	// TurnIndex is the 1-based fixed position in the turn rotation (1 = first to play).
+	// It never changes once a game starts, even after reconnects.
+	TurnIndex  int    `json:"turn_index"`
 }
 
 // RevealedPlayerHand holds one player's publicly-revealed hand for the
@@ -110,6 +114,10 @@ type StateSnapshot struct {
 	Phase       string       `json:"phase"`
 	Round       int          `json:"round"`
 	ActiveID    string       `json:"active_id"`
+	// NextID is the ID of the player who will act after the current active player.
+	// It follows the engine's advanceTurn logic (next index mod len, skipping nothing —
+	// disconnected players still receive auto-played turns, so next is always index+1).
+	NextID      string       `json:"next_id,omitempty"`
 	Players     []PlayerView `json:"players"`
 	Hand        []CardView   `json:"hand"`         // only the recipient's hand
 	Melds       []MeldView   `json:"melds"`

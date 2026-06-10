@@ -827,3 +827,197 @@ func TestReconnectGetsEventLogContext(t *testing.T) {
 		t.Error("reconnecting client must receive non-empty EventLogTail")
 	}
 }
+
+// ─── No-name reconnect protocol tests ────────────────────────────────────────
+
+// drainUntilNameRequired reads envelopes until a "name_required" envelope arrives.
+func drainUntilNameRequired(t *testing.T, r *bufio.Reader) {
+	t.Helper()
+	for {
+		env := readEnvelope(t, r)
+		if env.Type == protocol.EvtNameRequired {
+			return
+		}
+	}
+}
+
+// TestEmptyNameLobbyGetsNamePrompt: joining the lobby with an empty name must
+// trigger a name_required event. After sending a join with a real name the server
+// registers the player and sends a lobby update.
+func TestEmptyNameLobbyGetsNamePrompt(t *testing.T) {
+	_, addr := startServer(t)
+
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+
+	// Join with empty name.
+	if err := protocol.WriteJSON(conn, protocol.Command{Type: protocol.CmdJoin, Name: ""}); err != nil {
+		t.Fatalf("join write: %v", err)
+	}
+
+	// Must receive name_required prompt.
+	drainUntilNameRequired(t, r)
+
+	// Send a join with a proper name.
+	if err := protocol.WriteJSON(conn, protocol.Command{Type: protocol.CmdJoin, Name: "Alvaro"}); err != nil {
+		t.Fatalf("name write: %v", err)
+	}
+
+	// Server should now register and send a lobby state.
+	ls := drainUntilLobby(t, r)
+	found := false
+	for _, name := range ls.Players {
+		if name == "Alvaro" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("player Alvaro not in lobby after name prompt: %v", ls.Players)
+	}
+}
+
+// TestEmptyNameStartedGameGetsSeatsDirectly: joining a started game with an empty
+// name must receive seats immediately — no name exchange at all.
+func TestEmptyNameStartedGameGetsSeatsDirectly(t *testing.T) {
+	_, addr := startServer(t)
+
+	// Set up a 2-player game and start it.
+	aliceConn, aliceR := dialAndJoin(t, addr, "Alice")
+	drainLobby(t, aliceR)
+	bobConn, bobR := dialAndJoin(t, addr, "Bob")
+	_, _ = bobConn, bobR
+	drainLobby(t, aliceR)
+
+	if err := protocol.WriteJSON(aliceConn, protocol.Command{Type: protocol.CmdStart}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	drainUntilState(t, aliceR)
+
+	// Drop Alice so a seat is free.
+	aliceConn.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Connect with empty name — must get seats without any name_required event.
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+
+	if err := protocol.WriteJSON(conn, protocol.Command{Type: protocol.CmdJoin, Name: ""}); err != nil {
+		t.Fatalf("join write: %v", err)
+	}
+
+	// First envelope must be a seats offer, not name_required.
+	env := readEnvelope(t, r)
+	if env.Type == protocol.EvtNameRequired {
+		t.Error("started game join with empty name must not trigger name_required")
+	}
+	if env.Type != protocol.EvtSeats {
+		t.Errorf("expected seats offer, got %q", env.Type)
+	}
+}
+
+// TestNamedLobbyJoinUnchanged: joining with --name provided works as before
+// (no name_required prompt).
+func TestNamedLobbyJoinUnchanged(t *testing.T) {
+	_, addr := startServer(t)
+
+	conn, aliceR := dialAndJoin(t, addr, "Alice")
+	_ = conn
+
+	// Alice should receive a lobby state immediately (no name_required).
+	ls := drainUntilLobby(t, aliceR)
+	found := false
+	for _, name := range ls.Players {
+		if name == "Alice" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Alice not in lobby after named join: %v", ls.Players)
+	}
+}
+
+// TestTurnIndexPreservedAfterReconnect: disconnect and reclaim must not change the
+// Players slice order or ActiveIndex progression.
+func TestTurnIndexPreservedAfterReconnect(t *testing.T) {
+	_, addr := startServer(t)
+
+	aliceConn, aliceR := dialAndJoin(t, addr, "Alice")
+	drainLobby(t, aliceR)
+	bobConn, bobR := dialAndJoin(t, addr, "Bob")
+	_, _ = bobConn, bobR
+	drainLobby(t, aliceR)
+
+	if err := protocol.WriteJSON(aliceConn, protocol.Command{Type: protocol.CmdStart}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	snap1 := drainUntilState(t, aliceR)
+
+	// Record Alice's TurnIndex before disconnect.
+	aliceID := ""
+	aliceTurnIdx := 0
+	for _, p := range snap1.Players {
+		if p.IsSelf {
+			aliceID = p.ID
+			aliceTurnIdx = p.TurnIndex
+		}
+	}
+	if aliceTurnIdx == 0 {
+		t.Fatal("TurnIndex not populated in snapshot")
+	}
+
+	// Drop Alice.
+	aliceConn.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Reconnect via seat picker.
+	aliceConn2, aliceR2, offer := joinStartedGame(t, addr)
+	_ = aliceConn2
+	if len(offer.Seats) == 0 {
+		t.Fatal("expected seat offer")
+	}
+	for _, seat := range offer.Seats {
+		if seat.ID == aliceID {
+			if err := protocol.WriteJSON(aliceConn2, protocol.Command{
+				Type:   protocol.CmdClaimSeat,
+				SeatID: seat.ID,
+			}); err != nil {
+				t.Fatalf("claim seat: %v", err)
+			}
+			break
+		}
+	}
+
+	snap2 := drainUntilState(t, aliceR2)
+
+	// Alice's TurnIndex must be unchanged after reconnect.
+	aliceTurnIdx2 := 0
+	for _, p := range snap2.Players {
+		if p.IsSelf {
+			aliceTurnIdx2 = p.TurnIndex
+		}
+	}
+	if aliceTurnIdx2 != aliceTurnIdx {
+		t.Errorf("TurnIndex changed after reconnect: before=%d after=%d", aliceTurnIdx, aliceTurnIdx2)
+	}
+
+	// Players must appear in the same order (compare IDs in order).
+	if len(snap1.Players) != len(snap2.Players) {
+		t.Fatalf("player count changed: %d → %d", len(snap1.Players), len(snap2.Players))
+	}
+	for i := range snap1.Players {
+		if snap1.Players[i].ID != snap2.Players[i].ID {
+			t.Errorf("player order changed at index %d: %s → %s",
+				i, snap1.Players[i].ID, snap2.Players[i].ID)
+		}
+	}
+}

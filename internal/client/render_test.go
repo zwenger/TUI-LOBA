@@ -212,7 +212,7 @@ func TestOpponentBadgeHeight(t *testing.T) {
 	var badges []string
 	for _, p := range players {
 		if !p.IsSelf {
-			badges = append(badges, renderOpponentBadge(p))
+			badges = append(badges, renderOpponentBadge(p, p.TurnIndex))
 		}
 	}
 	if len(badges) == 0 {
@@ -246,7 +246,7 @@ func TestOpponentBadgeRowUniformHeight(t *testing.T) {
 	var badges []string
 	for _, p := range players {
 		if !p.IsSelf {
-			badges = append(badges, renderOpponentBadge(p))
+			badges = append(badges, renderOpponentBadge(p, p.TurnIndex))
 		}
 	}
 
@@ -299,7 +299,7 @@ func TestOpponentNameTruncation(t *testing.T) {
 		TotalScore: 10,
 		Connected: true,
 	}
-	badge := renderOpponentBadge(p)
+	badge := renderOpponentBadge(p, p.TurnIndex)
 	// The full name must not appear in the badge.
 	if strings.Contains(badge, "VeryLongPlayerName") {
 		t.Error("badge contains un-truncated name VeryLongPlayerName")
@@ -340,8 +340,8 @@ func TestOpponentActiveHighlight(t *testing.T) {
 	inactive := protocol.PlayerView{
 		ID: "b", Name: "Alice", CardCount: 8, TotalScore: 5, Connected: true,
 	}
-	activeBadge := renderOpponentBadge(active)
-	inactiveBadge := renderOpponentBadge(inactive)
+	activeBadge := renderOpponentBadge(active, 0)
+	inactiveBadge := renderOpponentBadge(inactive, 0)
 
 	if !strings.Contains(activeBadge, "▶") {
 		t.Error("active badge missing ▶ turn indicator")
@@ -846,5 +846,152 @@ func TestMergeEventLogTail(t *testing.T) {
 	// "X" and "Y" are new; "A","B","C" are already there.
 	if len(m.eventHistory) < 5 {
 		t.Errorf("expected at least 5 entries after extended merge, got %d: %v", len(m.eventHistory), m.eventHistory)
+	}
+}
+
+// ─── Turn-order display tests ─────────────────────────────────────────────────
+
+// makeRotationState builds a 4-player snapshot where self is turn index 2,
+// so rotation order for opponents is 3·, 4·, 1· (wrapping around).
+func makeRotationState() *protocol.StateSnapshot {
+	return &protocol.StateSnapshot{
+		Phase:    "draw",
+		Round:    1,
+		ActiveID: "p3",
+		NextID:   "p4",
+		Players: []protocol.PlayerView{
+			{ID: "p1", Name: "Alice", CardCount: 9, TotalScore: 0, TurnIndex: 1, Connected: true},
+			{ID: "p2", Name: "Bob", CardCount: 7, TotalScore: 5, TurnIndex: 2, Connected: true, IsSelf: true},
+			{ID: "p3", Name: "Carlos", CardCount: 6, TotalScore: 3, TurnIndex: 3, Connected: true, IsActive: true},
+			{ID: "p4", Name: "Diana", CardCount: 8, TotalScore: 10, TurnIndex: 4, Connected: true},
+		},
+	}
+}
+
+// TestOpponentBadgesShowPositionNumbers verifies that opponent badges include
+// the 1-based turn position prefix ("3·", "4·", "1·") in rotation order.
+func TestOpponentBadgesShowPositionNumbers(t *testing.T) {
+	s := makeRotationState()
+	m := Model{
+		screen: screenGame,
+		selfID: "p2",
+		state:  s,
+		width:  100,
+		height: 40,
+	}
+
+	result := m.renderOpponents(s)
+
+	// Each opponent's position label must appear.
+	for _, pos := range []string{"3·", "4·", "1·"} {
+		if !strings.Contains(result, pos) {
+			t.Errorf("opponent row missing position label %q\nrow:\n%s", pos, result)
+		}
+	}
+	// Self (p2, Bob) must NOT appear in the opponents row.
+	if strings.Contains(result, "Bob") {
+		t.Error("opponents row must not contain self player Bob")
+	}
+}
+
+// TestOpponentRotationOrder verifies that opponents appear in rotation order
+// starting after self. Self is 2·, so order should be 3·Carlos, 4·Diana, 1·Alice.
+func TestOpponentRotationOrder(t *testing.T) {
+	s := makeRotationState()
+	opponents := rotationOrderedOpponents(s.Players)
+
+	wantOrder := []int{3, 4, 1}
+	for i, p := range opponents {
+		if p.TurnIndex != wantOrder[i] {
+			t.Errorf("opponents[%d].TurnIndex = %d, want %d", i, p.TurnIndex, wantOrder[i])
+		}
+	}
+}
+
+// TestSiguienteHintInView verifies that the game view status line includes the
+// "siguiente" hint with the next player's position and name.
+func TestSiguienteHintInView(t *testing.T) {
+	s := makeRotationState()
+	hand := makeHand()
+	s.Hand = hand
+
+	m := Model{
+		screen: screenGame,
+		selfID: "p2",
+		state:  s,
+		width:  120,
+		height: 40,
+		cursor: 0,
+		selected: make(map[int]bool),
+	}
+	m.displayToServer = make([]int, len(hand))
+	for i := range m.displayToServer {
+		m.displayToServer[i] = i
+	}
+
+	view := m.viewGame()
+	// NextID is p4=Diana (TurnIndex 4); expect "siguiente: 4·Diana" or similar.
+	if !strings.Contains(view, "siguiente") {
+		t.Error("game view missing 'siguiente' turn hint")
+	}
+	if !strings.Contains(view, "Diana") {
+		t.Error("game view 'siguiente' hint missing next player name Diana")
+	}
+}
+
+// TestHandHeaderShowsPosition verifies that the hand header includes the self
+// turn index label (e.g. "(2·)").
+func TestHandHeaderShowsPosition(t *testing.T) {
+	s := makeRotationState()
+	hand := makeHand()
+	s.Hand = hand
+
+	m := Model{
+		screen: screenGame,
+		selfID: "p2",
+		state:  s,
+		width:  120,
+		height: 40,
+		cursor: 0,
+		selected: make(map[int]bool),
+	}
+	m.displayToServer = make([]int, len(hand))
+	for i := range m.displayToServer {
+		m.displayToServer[i] = i
+	}
+
+	view := m.viewGame()
+	if !strings.Contains(view, "(2·)") {
+		t.Errorf("hand header missing self position label (2·)\nview:\n%s", view)
+	}
+}
+
+// TestRenderVisualWithRotation is a visual sanity print of the full game view
+// with 4 players and rotation order. Always passes.
+func TestRenderVisualWithRotation(t *testing.T) {
+	s := makeRotationState()
+	hand := makeHand()
+	s.Hand = hand
+
+	m := Model{
+		screen: screenGame,
+		selfID: "p2",
+		state:  s,
+		width:  100,
+		height: 40,
+		cursor: 2,
+		selected: make(map[int]bool),
+	}
+	m.displayToServer = make([]int, len(hand))
+	for i := range m.displayToServer {
+		m.displayToServer[i] = i
+	}
+
+	view := m.viewGame()
+	fmt.Println("\n=== Game view with rotation order (width 100) ===")
+	fmt.Println(view)
+
+	if strings.TrimSpace(view) == "" {
+		t.Error("viewGame() returned empty string")
 	}
 }

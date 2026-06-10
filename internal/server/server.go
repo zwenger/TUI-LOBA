@@ -148,13 +148,27 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 
 	// Lobby join flow.
-	playerID, _, err := s.registerPlayer(conn, cmd.Name)
+	// If the client sent an empty name, prompt for one before registering.
+	name := cmd.Name
+	for name == "" {
+		_ = protocol.SendEnvelope(conn, protocol.EvtNameRequired, map[string]string{"message": "Ingresá tu nombre para unirte."})
+		var nameCmd protocol.Command
+		if err := protocol.ReadJSON(r, &nameCmd); err != nil {
+			return // client disconnected
+		}
+		if nameCmd.Type != protocol.CmdJoin {
+			continue // ignore non-join messages while waiting for a name
+		}
+		name = strings.TrimSpace(nameCmd.Name)
+	}
+
+	playerID, _, err := s.registerPlayer(conn, name)
 	if err != nil {
 		_ = protocol.SendError(conn, err.Error())
 		return
 	}
 
-	log.Printf("[server] %s joined as %s", conn.RemoteAddr(), cmd.Name)
+	log.Printf("[server] %s joined as %s", conn.RemoteAddr(), name)
 
 	// Start the outbound writer goroutine.
 	s.mu.Lock()
@@ -312,9 +326,7 @@ func (s *Server) registerPlayer(conn net.Conn, name string) (string, bool, error
 	if len(s.lobby) >= 6 {
 		return "", false, fmt.Errorf("la sala está llena (máximo 6 jugadores)")
 	}
-	if name == "" {
-		name = fmt.Sprintf("Jugador%d", len(s.lobby)+1)
-	}
+	// name is guaranteed non-empty by the caller (handleConn loops until a name is provided).
 
 	id := fmt.Sprintf("p%d", len(s.lobby)+1)
 
@@ -823,6 +835,8 @@ func buildSnapshot(g *game.Game, selfID string) protocol.StateSnapshot {
 
 	if len(g.Players) > 0 {
 		snap.ActiveID = g.Players[g.ActiveIndex].ID
+		nextIdx := (g.ActiveIndex + 1) % len(g.Players)
+		snap.NextID = g.Players[nextIdx].ID
 	}
 
 	// Discard pile top.
@@ -832,7 +846,7 @@ func buildSnapshot(g *game.Game, selfID string) protocol.StateSnapshot {
 	}
 
 	// Players.
-	for _, p := range g.Players {
+	for i, p := range g.Players {
 		pv := protocol.PlayerView{
 			ID:         p.ID,
 			Name:       p.Name,
@@ -843,6 +857,7 @@ func buildSnapshot(g *game.Game, selfID string) protocol.StateSnapshot {
 			Connected:  p.Connected,
 			IsActive:   p.ID == snap.ActiveID,
 			IsSelf:     p.ID == selfID,
+			TurnIndex:  i + 1, // 1-based, fixed by Players slice order
 		}
 		snap.Players = append(snap.Players, pv)
 

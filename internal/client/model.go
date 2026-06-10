@@ -167,11 +167,10 @@ func New(addr, name string) Model {
 		addr:     addr,
 		name:     name,
 		selected: make(map[int]bool),
-	}
-	if name == "" {
-		m.screen = screenName
-	} else {
-		m.screen = screenLobby // will connect first
+		// Always start connecting immediately; if name is empty we show the name
+		// screen only after the server asks for one (EvtNameRequired). For a started
+		// game the name is never needed — the seat defines identity.
+		screen: screenLobby,
 	}
 	return m
 }
@@ -179,10 +178,9 @@ func New(addr, name string) Model {
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
-	if m.name != "" {
-		return connectCmd(m.addr, m.name)
-	}
-	return nil
+	// Connect immediately regardless of whether we have a name.
+	// The server will tell us if it needs a name (lobby + empty name path).
+	return connectCmd(m.addr)
 }
 
 // ─── Update ───────────────────────────────────────────────────────────────────
@@ -198,7 +196,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case connectedMsg:
 		m.conn = msg.conn
 		m.reader = bufio.NewReader(msg.conn)
-		// Send join command.
+		// Send join command with whatever name we have (may be empty for lobby path
+		// without --name; the server will ask for one via EvtNameRequired).
 		cmd := protocol.Command{Type: protocol.CmdJoin, Name: m.name}
 		_ = protocol.WriteJSON(m.conn, cmd)
 		return m, readServerMsg(m.reader)
@@ -299,6 +298,13 @@ func (m Model) handleEnvelope(env protocol.Envelope) (Model, tea.Cmd) {
 			}
 		}
 
+	case protocol.EvtNameRequired:
+		// Server is asking us for a name (lobby join with empty name).
+		// Switch to the name entry screen; the connection stays alive.
+		m.screen = screenName
+		m.nameInput = ""
+		m.nameErr = ""
+
 	case protocol.EvtError:
 		var e map[string]string
 		if err := json.Unmarshal(env.Payload, &e); err == nil {
@@ -353,8 +359,15 @@ func (m Model) handleNameKey(key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.name = name
+		m.nameInput = ""
+		m.nameErr = ""
 		m.screen = screenLobby
-		return m, connectCmd(m.addr, m.name)
+		// We are already connected (server prompted for our name). Send the join
+		// command with the chosen name; the server will register and send lobby state.
+		if m.conn != nil {
+			_ = protocol.WriteJSON(m.conn, protocol.Command{Type: protocol.CmdJoin, Name: m.name})
+		}
+		return m, nil
 	case "backspace":
 		if len(m.nameInput) > 0 {
 			m.nameInput = m.nameInput[:len(m.nameInput)-1]
@@ -936,14 +949,20 @@ func truncateName(name string, maxLen int) string {
 // renderOpponentBadge renders a multi-line bordered badge for one opponent.
 // Height is always 3 content lines (name/turn, cards, score+conn) so that
 // lipgloss.JoinHorizontal aligns all badges in a row at the same baseline.
-func renderOpponentBadge(p protocol.PlayerView) string {
+// pos is the 1-based turn index shown as a position badge prefix.
+func renderOpponentBadge(p protocol.PlayerView, pos int) string {
 	name := truncateName(p.Name, 12)
+
+	var posLabel string
+	if pos > 0 {
+		posLabel = fmt.Sprintf("%d· ", pos)
+	}
 
 	var nameLine string
 	if p.IsActive {
-		nameLine = styleBadgeNameActive.Render("▶ "+name) + styleActive.Render(" ◀")
+		nameLine = styleBadgeNameActive.Render("▶ "+posLabel+name) + styleActive.Render(" ◀")
 	} else {
-		nameLine = styleBadgeName.Render("  " + name)
+		nameLine = styleBadgeName.Render("  " + posLabel + name)
 	}
 
 	cardsLine := fmt.Sprintf("  ♦ %d cartas", p.CardCount)
@@ -966,8 +985,13 @@ func renderOpponentBadge(p protocol.PlayerView) string {
 }
 
 // renderOpponentChip renders a compact single-line chip for very narrow terminals.
-func renderOpponentChip(p protocol.PlayerView) string {
+// pos is the 1-based turn index shown as a prefix.
+func renderOpponentChip(p protocol.PlayerView, pos int) string {
 	name := truncateName(p.Name, 10)
+	posLabel := ""
+	if pos > 0 {
+		posLabel = fmt.Sprintf("%d·", pos)
+	}
 	turnMark := ""
 	if p.IsActive {
 		turnMark = styleActive.Render("▶")
@@ -976,7 +1000,7 @@ func renderOpponentChip(p protocol.PlayerView) string {
 	if !p.Connected {
 		connMark = styleBadgeDisconnStr.Render("✗")
 	}
-	chip := fmt.Sprintf("%s%s ♦%d ▸%dpts%s", turnMark, name, p.CardCount, p.TotalScore, connMark)
+	chip := fmt.Sprintf("%s%s%s ♦%d ▸%dpts%s", turnMark, posLabel, name, p.CardCount, p.TotalScore, connMark)
 	return chip
 }
 
@@ -1009,13 +1033,46 @@ func wrapBadges(badges []string, termWidth, badgeGap int) string {
 // compactChipWidth is the minimum terminal width below which we switch to chips.
 const compactChipWidth = 60
 
-func (m Model) renderOpponents(s *protocol.StateSnapshot) string {
+// rotationOrderedOpponents returns the opponents slice sorted in turn-rotation
+// order starting from the player after self. Each player's TurnIndex is used;
+// if TurnIndex is zero (old server / snapshot without the field) the slice
+// order from the snapshot is used unchanged.
+func rotationOrderedOpponents(players []protocol.PlayerView) []protocol.PlayerView {
+	var self protocol.PlayerView
+	selfFound := false
+	for _, p := range players {
+		if p.IsSelf {
+			self = p
+			selfFound = true
+			break
+		}
+	}
+
 	var opponents []protocol.PlayerView
-	for _, p := range s.Players {
+	for _, p := range players {
 		if !p.IsSelf {
 			opponents = append(opponents, p)
 		}
 	}
+
+	// Only reorder when TurnIndex is populated (non-zero) and self is known.
+	if !selfFound || self.TurnIndex == 0 {
+		return opponents
+	}
+
+	n := len(players) // total number of players
+	// Sort opponents by their position in the rotation starting just after self.
+	// Distance from self = (p.TurnIndex - self.TurnIndex + n) % n
+	sort.SliceStable(opponents, func(a, b int) bool {
+		da := (opponents[a].TurnIndex - self.TurnIndex + n) % n
+		db := (opponents[b].TurnIndex - self.TurnIndex + n) % n
+		return da < db
+	})
+	return opponents
+}
+
+func (m Model) renderOpponents(s *protocol.StateSnapshot) string {
+	opponents := rotationOrderedOpponents(s.Players)
 	if len(opponents) == 0 {
 		return styleDim.Render("Sin oponentes") + "\n"
 	}
@@ -1029,7 +1086,7 @@ func (m Model) renderOpponents(s *protocol.StateSnapshot) string {
 		// Compact chip mode: single-line chips separated by " · ", wrapped as whole units.
 		var chips []string
 		for _, p := range opponents {
-			chips = append(chips, renderOpponentChip(p))
+			chips = append(chips, renderOpponentChip(p, p.TurnIndex))
 		}
 		sep := styleBadgeChipSep.Render(" · ")
 		// Wrap chips into rows keeping them as whole units.
@@ -1055,7 +1112,7 @@ func (m Model) renderOpponents(s *protocol.StateSnapshot) string {
 	// Full badge mode.
 	badges := make([]string, len(opponents))
 	for i, p := range opponents {
-		badges[i] = renderOpponentBadge(p)
+		badges[i] = renderOpponentBadge(p, p.TurnIndex)
 	}
 	return wrapBadges(badges, termWidth, 1) + "\n"
 }
@@ -1111,10 +1168,12 @@ func (m Model) renderHand(s *protocol.StateSnapshot) string {
 	// Self info.
 	selfName := ""
 	selfScore := "?"
+	selfTurnIdx := 0
 	for _, p := range s.Players {
 		if p.IsSelf {
 			selfName = p.Name
 			selfScore = fmt.Sprintf("%d", p.TotalScore)
+			selfTurnIdx = p.TurnIndex
 			break
 		}
 	}
@@ -1123,7 +1182,11 @@ func (m Model) renderHand(s *protocol.StateSnapshot) string {
 	if isMyTurn {
 		turnMark = styleActive.Render(" ◄ TU TURNO")
 	}
-	handHeader := fmt.Sprintf("Tu mano — %s%s  (puntaje: %s)", selfName, turnMark, selfScore)
+	posLabel := ""
+	if selfTurnIdx > 0 {
+		posLabel = fmt.Sprintf(" (%d·)", selfTurnIdx)
+	}
+	handHeader := fmt.Sprintf("Tu mano — %s%s%s  (puntaje: %s)", selfName, posLabel, turnMark, selfScore)
 
 	// Build sorted display order.
 	displayHand := make([]protocol.CardView, len(s.Hand))
@@ -1170,8 +1233,28 @@ func (m Model) renderHelp(isMyTurn bool) string {
 	if m.state != nil && m.state.PickedUpDiscard != nil {
 		pickedNote = stylePickedUp.Render("  [★ debés jugar " + m.state.PickedUpDiscard.Label + " antes de descartar]")
 	}
+
+	// "siguiente" hint: show who plays after the current active player.
+	nextHint := ""
+	if m.state != nil && m.state.NextID != "" {
+		nextName := ""
+		for _, p := range m.state.Players {
+			if p.ID == m.state.NextID {
+				if p.TurnIndex > 0 {
+					nextName = fmt.Sprintf("%d·%s", p.TurnIndex, truncateName(p.Name, 10))
+				} else {
+					nextName = truncateName(p.Name, 10)
+				}
+				break
+			}
+		}
+		if nextName != "" {
+			nextHint = styleDim.Render("  siguiente: " + nextName)
+		}
+	}
+
 	if !isMyTurn {
-		return styleHelp.Render("← →/h l: mover cursor  Espacio: seleccionar  S: ordenar  (esperando)") + " " + sortLabel + overlayHints + pickedNote + "\n"
+		return styleHelp.Render("← →/h l: mover cursor  Espacio: seleccionar  S: ordenar  (esperando)") + " " + sortLabel + overlayHints + nextHint + pickedNote + "\n"
 	}
 	phase := ""
 	if m.state != nil {
@@ -1179,9 +1262,9 @@ func (m Model) renderHelp(isMyTurn bool) string {
 	}
 	switch phase {
 	case "draw":
-		return styleHelp.Render("D: robar del mazo  T: tomar del pozo  S: ordenar") + " " + sortLabel + overlayHints + "\n"
+		return styleHelp.Render("D: robar del mazo  T: tomar del pozo  S: ordenar") + " " + sortLabel + overlayHints + nextHint + "\n"
 	default:
-		return styleHelp.Render("Espacio: seleccionar  M: pierna  E: escalera  1-9: agregar en comb.#N  X: descartar  S: ordenar  Esc: limpiar") + " " + sortLabel + overlayHints + pickedNote + "\n"
+		return styleHelp.Render("Espacio: seleccionar  M: pierna  E: escalera  1-9: agregar en comb.#N  X: descartar  S: ordenar  Esc: limpiar") + " " + sortLabel + overlayHints + nextHint + pickedNote + "\n"
 	}
 }
 
@@ -1808,7 +1891,7 @@ func (m Model) serverIndexes(displayIdxs []int) []int {
 
 // ─── Tea commands ─────────────────────────────────────────────────────────────
 
-func connectCmd(addr, name string) tea.Cmd {
+func connectCmd(addr string) tea.Cmd {
 	return func() tea.Msg {
 		conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 		if err != nil {
