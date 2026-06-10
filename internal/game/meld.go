@@ -329,28 +329,12 @@ func fillJokerGap(sorted []int) bool {
 
 // ─── Discard-pickup usability check ──────────────────────────────────────────
 
-// CanUsePickedCard reports whether card can be immediately used (melded or laid
-// off) given the current hand (without the card itself) and existing table melds.
+// CanUsePickedCard reports whether card can be immediately used in a new meld
+// formed from the current hand (without the card itself).
 // It tries:
 //  1. Forming a new pierna with cards from hand.
 //  2. Forming a new escalera with cards from hand.
-//  3. Laying off onto any existing meld.
 func CanUsePickedCard(card Card, hand Hand, melds []Meld) bool {
-	// Check lay-off onto existing melds (fast path, no enumeration needed).
-	for i := range melds {
-		m := &melds[i]
-		switch m.Type {
-		case MeldPierna:
-			if CanLayOffPierna(m, card) == nil {
-				return true
-			}
-		case MeldEscalera:
-			if CanLayOffEscalera(m, card) == nil {
-				return true
-			}
-		}
-	}
-
 	// Try to form a new pierna: need 2 more cards of the same rank in hand
 	// (all different suits from each other and from the picked card).
 	if !card.IsJoker() {

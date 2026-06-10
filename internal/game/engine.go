@@ -46,9 +46,9 @@ type Player struct {
 	ID            string
 	Name          string
 	Hand          Hand
-	TotalScore    int   // cumulative across rounds
-	RoundScore    int   // penalty for the most recently completed round
-	HasMelded     bool  // true once the player has successfully laid a meld this round
+	TotalScore    int  // cumulative across rounds
+	RoundScore    int  // penalty for the most recently completed round
+	HasMelded     bool // true once the player has successfully laid a meld this round
 	Connected     bool
 	MeldedIndexes []int // indexes into Game.Melds that this player created (informational)
 
@@ -245,8 +245,8 @@ func (g *Game) DrawStock(playerID string) error {
 }
 
 // DrawDiscard draws the top discard card for the active player.
-// Classic Loba rule: the player may only take the discard if they can immediately
-// use it — either in a new meld or laid off onto an existing table meld.
+// The player may only take the discard if they can immediately use it in a new
+// meld formed from their own hand.
 func (g *Game) DrawDiscard(playerID string) error {
 	if err := g.checkTurn(playerID, PhaseDrawing); err != nil {
 		return err
@@ -256,9 +256,9 @@ func (g *Game) DrawDiscard(playerID string) error {
 	}
 	card := g.DiscardPile[len(g.DiscardPile)-1]
 
-	// Validate: card must be usable in a meld or lay-off this turn.
+	// Validate: card must be usable in a new meld this turn.
 	if !CanUsePickedCard(card, g.activePlayer().Hand, g.Melds) {
-		return fmt.Errorf("solo se puede tomar del pozo si la carta %s se puede usar en una bajada o agregada en este turno", card.String())
+		return fmt.Errorf("solo se puede tomar del pozo si la carta %s se puede usar en una bajada con tu mano en este turno", card.String())
 	}
 
 	g.DiscardPile = g.DiscardPile[:len(g.DiscardPile)-1]

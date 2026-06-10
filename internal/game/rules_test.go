@@ -19,7 +19,10 @@ func TestDeckComposition(t *testing.T) {
 	}
 
 	// Count suits and ranks.
-	type key struct{ rank Rank; suit Suit }
+	type key struct {
+		rank Rank
+		suit Suit
+	}
 	counts := make(map[key]int)
 	jokers := 0
 	for _, card := range deck {
@@ -497,11 +500,12 @@ func TestDiscardPickupRule(t *testing.T) {
 		}
 	})
 
-	t.Run("accept when card can be laid off on existing meld", func(t *testing.T) {
+	t.Run("reject when card can only be laid off on existing meld", func(t *testing.T) {
 		g := newG()
 		g.Melds = []Meld{{
-			Type:  MeldEscalera,
-			Cards: []Card{c(Five, Clubs), c(Six, Clubs), c(Seven, Clubs)},
+			Type:    MeldEscalera,
+			Cards:   []Card{c(Five, Clubs), c(Six, Clubs), c(Seven, Clubs)},
+			OwnerID: "p2",
 		}}
 		g.Players[0].Hand = Hand{
 			c(Two, Hearts), c(Three, Hearts), c(Jack, Spades),
@@ -509,9 +513,14 @@ func TestDiscardPickupRule(t *testing.T) {
 			c(Four, Diamonds), c(Six, Spades), c(Nine, Clubs),
 		}
 		g.DiscardPile = []Card{c(Eight, Clubs)}
-		g.Players[0].HasMelded = true
-		if err := g.DrawDiscard("p1"); err != nil {
-			t.Errorf("expected acceptance (lay-off possible): %v", err)
+		if err := g.DrawDiscard("p1"); err == nil {
+			t.Fatal("expected rejection: discard cannot be taken only to extend an existing meld")
+		}
+		if got := len(g.DiscardPile); got != 1 {
+			t.Fatalf("discard pile should remain unchanged, got %d cards", got)
+		}
+		if g.Players[0].PickedUpDiscard != nil {
+			t.Fatal("PickedUpDiscard should stay nil on rejection")
 		}
 	})
 
@@ -563,28 +572,26 @@ func TestDiscardPickupRule(t *testing.T) {
 		}
 	})
 
-	t.Run("picked flag cleared after lay-off", func(t *testing.T) {
+	t.Run("reject when card only extends own meld", func(t *testing.T) {
 		g := newG()
-		// Put a pierna on the table that Alice can lay the picked card onto.
+		// Put a pierna on the table owned by Alice; the discard still must not be
+		// drawable if it only helps with that meld.
 		g.Melds = []Meld{{
 			Type:    MeldPierna,
 			Cards:   []Card{c(Seven, Spades), c(Seven, Hearts), c(Seven, Diamonds)},
 			OwnerID: "p1",
 		}}
-		g.Players[0].HasMelded = true
 		g.Players[0].Hand = Hand{
 			c(Two, Clubs), c(Three, Clubs), c(Four, Clubs),
 			c(King, Spades), c(Queen, Hearts), c(Jack, Diamonds),
 			c(Ten, Clubs), c(Nine, Clubs), c(Eight, Spades),
 		}
 		g.DiscardPile = []Card{c(Seven, Clubs)}
-		_ = g.DrawDiscard("p1")
-		lastIdx := len(g.Players[0].Hand) - 1
-		if err := g.LayOff("p1", []int{lastIdx}, 0); err != nil {
-			t.Fatalf("lay-off: %v", err)
+		if err := g.DrawDiscard("p1"); err == nil {
+			t.Fatal("expected rejection: discard cannot be taken only to extend own meld")
 		}
 		if g.Players[0].PickedUpDiscard != nil {
-			t.Error("PickedUpDiscard should be nil after laying off the picked card")
+			t.Error("PickedUpDiscard should stay nil when draw is rejected")
 		}
 	})
 
@@ -913,9 +920,9 @@ func TestMeldEscaleraEngineVariants(t *testing.T) {
 	runs := [][]Card{
 		{c(Two, Clubs), c(Three, Clubs), c(Four, Clubs)},
 		{c(Jack, Spades), c(Queen, Spades), c(King, Spades)},
-		{c(Ace, Hearts), c(Two, Hearts), c(Three, Hearts)},                         // ace-low
-		{c(Queen, Diamonds), c(King, Diamonds), c(Ace, Diamonds)},                  // ace-high
-		{c(Three, Clubs), c(Four, Clubs), c(Five, Clubs), c(Six, Clubs)},           // 4-card
+		{c(Ace, Hearts), c(Two, Hearts), c(Three, Hearts)},               // ace-low
+		{c(Queen, Diamonds), c(King, Diamonds), c(Ace, Diamonds)},        // ace-high
+		{c(Three, Clubs), c(Four, Clubs), c(Five, Clubs), c(Six, Clubs)}, // 4-card
 	}
 
 	players := []struct{ ID, Name string }{{"p1", "Alice"}, {"p2", "Bob"}}
@@ -1322,7 +1329,7 @@ func TestFullRoundSeeded(t *testing.T) {
 	// Rig Alice's hand to a known-good state for testing.
 	g.Players[0].Hand = Hand{
 		c(Seven, Spades), c(Seven, Hearts), c(Seven, Diamonds), // pierna
-		c(Three, Clubs), c(Four, Clubs), c(Five, Clubs),         // escalera
+		c(Three, Clubs), c(Four, Clubs), c(Five, Clubs), // escalera
 		c(King, Spades), c(Queen, Hearts), c(Jack, Diamonds),
 	}
 

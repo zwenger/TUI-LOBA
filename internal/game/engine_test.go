@@ -665,12 +665,14 @@ func TestDrawDiscardAcceptedWhenMeldable(t *testing.T) {
 	}
 }
 
-func TestDrawDiscardAcceptedWhenLayOffable(t *testing.T) {
+func TestDrawDiscardRejectedWhenOnlyOpponentMeldIsPlayable(t *testing.T) {
 	g := makeGame()
-	// Put a 5-6-7 escalera on the table; Alice picks up 8♣ to extend it.
+	// Put a 5-6-7 escalera on Bob's side; Alice can only extend it, which should
+	// NOT allow taking the discard.
 	g.Melds = []Meld{{
-		Type:  MeldEscalera,
-		Cards: []Card{c(Five, Clubs), c(Six, Clubs), c(Seven, Clubs)},
+		Type:    MeldEscalera,
+		Cards:   []Card{c(Five, Clubs), c(Six, Clubs), c(Seven, Clubs)},
+		OwnerID: "p2",
 	}}
 	g.Players[0].Hand = Hand{
 		c(Two, Hearts), c(Three, Hearts), c(Jack, Spades),
@@ -678,10 +680,15 @@ func TestDrawDiscardAcceptedWhenLayOffable(t *testing.T) {
 		c(Four, Diamonds), c(Six, Spades), c(Nine, Clubs),
 	}
 	g.DiscardPile = []Card{c(Eight, Clubs)}
-	g.Players[0].HasMelded = true // needed for LayOff eligibility check
 
-	if err := g.DrawDiscard("p1"); err != nil {
-		t.Errorf("expected acceptance (lay-off possible): %v", err)
+	if err := g.DrawDiscard("p1"); err == nil {
+		t.Fatal("expected rejection: discard cannot be taken only to extend an opponent meld")
+	}
+	if got := len(g.DiscardPile); got != 1 {
+		t.Fatalf("discard pile should remain unchanged, got %d cards", got)
+	}
+	if g.Players[0].PickedUpDiscard != nil {
+		t.Fatal("PickedUpDiscard should stay nil on rejection")
 	}
 }
 
