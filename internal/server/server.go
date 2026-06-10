@@ -13,6 +13,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,15 +32,17 @@ type Server struct {
 }
 
 type lobbyEntry struct {
-	id   string
-	name string
+	id        string
+	name      string
+	connected bool // false when the lobby member disconnected before game start
 }
 
 type client struct {
-	id   string
-	name string
-	conn net.Conn
-	send chan []byte // buffered outbound channel
+	id        string
+	name      string
+	conn      net.Conn
+	send      chan []byte // buffered outbound channel
+	connected bool       // false while the underlying connection is gone
 }
 
 // New creates a new server that will listen on the given port.
@@ -108,13 +111,17 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
-	playerID, err := s.registerPlayer(conn, cmd.Name)
+	playerID, isRejoin, err := s.registerPlayer(conn, cmd.Name)
 	if err != nil {
 		_ = protocol.SendError(conn, err.Error())
 		return
 	}
 
-	log.Printf("[server] %s joined as %s", conn.RemoteAddr(), cmd.Name)
+	if isRejoin {
+		log.Printf("[server] %s reconnected as %s", conn.RemoteAddr(), cmd.Name)
+	} else {
+		log.Printf("[server] %s joined as %s", conn.RemoteAddr(), cmd.Name)
+	}
 
 	// Start the outbound writer goroutine.
 	s.mu.Lock()
@@ -122,8 +129,22 @@ func (s *Server) handleConn(conn net.Conn) {
 	s.mu.Unlock()
 	go cl.writePump()
 
-	// Broadcast updated lobby state.
-	s.broadcastLobby()
+	if isRejoin {
+		// Send a fresh state snapshot and broadcast reconnection to all players.
+		s.mu.Lock()
+		if s.game != nil {
+			p := s.game.PlayerByID(playerID)
+			if p != nil {
+				msg := fmt.Sprintf("%s se reconectó.", p.Name)
+				s.game.AddEvent(msg)
+			}
+		}
+		s.broadcastStateLocked()
+		s.mu.Unlock()
+	} else {
+		// Broadcast updated lobby state for a fresh join.
+		s.broadcastLobby()
+	}
 
 	// Read loop.
 	for {
@@ -139,15 +160,45 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-func (s *Server) registerPlayer(conn net.Conn, name string) (string, error) {
+// registerPlayer registers a new player or reattaches a reconnecting one.
+// Returns (playerID, isRejoin, error).
+func (s *Server) registerPlayer(conn net.Conn, name string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.started {
-		return "", fmt.Errorf("la partida ya comenzó")
+		// Game is running: only allow reconnect (same name, disconnected seat).
+		return s.handleRejoin(conn, name)
 	}
+
+	// Lobby phase: reject duplicate connected names.
+	for _, e := range s.lobby {
+		if e.connected && strings.EqualFold(e.name, name) {
+			return "", false, fmt.Errorf("ese nombre ya está en uso")
+		}
+		// Reclaim a disconnected lobby seat with the same name.
+		if !e.connected && strings.EqualFold(e.name, name) {
+			cl := &client{
+				id:        e.id,
+				name:      e.name,
+				conn:      conn,
+				send:      make(chan []byte, 64),
+				connected: true,
+			}
+			s.clients[e.id] = cl
+			// Mark the lobby entry as connected again.
+			for i := range s.lobby {
+				if s.lobby[i].id == e.id {
+					s.lobby[i].connected = true
+					break
+				}
+			}
+			return e.id, false, nil
+		}
+	}
+
 	if len(s.lobby) >= 6 {
-		return "", fmt.Errorf("la sala está llena (máximo 6 jugadores)")
+		return "", false, fmt.Errorf("la sala está llena (máximo 6 jugadores)")
 	}
 	if name == "" {
 		name = fmt.Sprintf("Jugador%d", len(s.lobby)+1)
@@ -156,61 +207,151 @@ func (s *Server) registerPlayer(conn net.Conn, name string) (string, error) {
 	id := fmt.Sprintf("p%d", len(s.lobby)+1)
 
 	cl := &client{
-		id:   id,
-		name: name,
-		conn: conn,
-		send: make(chan []byte, 64),
+		id:        id,
+		name:      name,
+		conn:      conn,
+		send:      make(chan []byte, 64),
+		connected: true,
 	}
 	s.clients[id] = cl
-	s.lobby = append(s.lobby, lobbyEntry{id: id, name: name})
+	s.lobby = append(s.lobby, lobbyEntry{id: id, name: name, connected: true})
 
 	if s.hostID == "" {
 		s.hostID = id
 		log.Printf("[server] %s is the host", name)
 	}
 
-	return id, nil
+	return id, false, nil
+}
+
+// handleRejoin attempts to reattach a reconnecting player during an active game.
+// Caller must hold mu.
+func (s *Server) handleRejoin(conn net.Conn, name string) (string, bool, error) {
+	if name == "" {
+		return "", false, fmt.Errorf("la partida ya comenzó")
+	}
+
+	// Check for a connected player with the same name (duplicate rejection).
+	for _, cl := range s.clients {
+		if cl.connected && strings.EqualFold(cl.name, name) {
+			return "", false, fmt.Errorf("ese nombre ya está en uso")
+		}
+	}
+
+	// Look for a disconnected game player with a matching name.
+	if s.game != nil {
+		for _, p := range s.game.Players {
+			if !p.Connected && strings.EqualFold(p.Name, name) {
+				// Reattach: create a new send channel and bind the new connection.
+				newCl := &client{
+					id:        p.ID,
+					name:      p.Name,
+					conn:      conn,
+					send:      make(chan []byte, 64),
+					connected: true,
+				}
+				s.clients[p.ID] = newCl
+				p.Connected = true
+				return p.ID, true, nil
+			}
+		}
+	}
+
+	return "", false, fmt.Errorf("la partida ya comenzó")
 }
 
 func (s *Server) markDisconnected(playerID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	name := playerID
 	if s.game != nil {
 		p := s.game.PlayerByID(playerID)
 		if p != nil {
 			p.Connected = false
+			name = p.Name
 			log.Printf("[server] %s disconnected", p.Name)
+		}
+	} else {
+		// Lobby disconnect: free the seat so someone else (or a rejoin) can take it.
+		for i := range s.lobby {
+			if s.lobby[i].id == playerID {
+				s.lobby[i].connected = false
+				break
+			}
 		}
 	}
 
 	if cl, ok := s.clients[playerID]; ok {
+		// Drain and close the send channel. Keep the map entry so a rejoin can
+		// replace it, but mark it disconnected.
+		cl.connected = false
 		close(cl.send)
-		delete(s.clients, playerID)
-	}
-
-	// If game is running and it's the disconnected player's turn, auto-play.
-	if s.game != nil && s.game.Phase == game.PhaseDrawing {
-		active := s.game.Players[s.game.ActiveIndex]
-		if active.ID == playerID {
-			go s.runAutoPlay(playerID)
+		// Replace with a stub so enqueueEnvelope silently drops messages while
+		// disconnected. We keep the map entry; handleRejoin will replace it.
+		s.clients[playerID] = &client{
+			id:        playerID,
+			name:      name,
+			conn:      nil,
+			send:      make(chan []byte, 1), // tiny channel, never drained
+			connected: false,
 		}
 	}
+
 	s.broadcastStateLocked()
+	// Schedule auto-play if the disconnected player is now the active one.
+	s.scheduleAutoPlayLocked()
 }
 
-func (s *Server) runAutoPlay(playerID string) {
-	time.Sleep(500 * time.Millisecond)
+// scheduleAutoPlayLocked checks whether the current active player is disconnected
+// and, if so, launches a goroutine that will auto-play their turn after a short
+// delay. It must be called with mu held so it can safely read game state; the
+// goroutine itself re-acquires mu before acting.
+func (s *Server) scheduleAutoPlayLocked() {
+	if s.game == nil {
+		return
+	}
+	g := s.game
+	if g.Phase == game.PhaseRoundEnd || g.Phase == game.PhaseGameOver {
+		return
+	}
+	active := g.Players[g.ActiveIndex]
+	if active.Connected {
+		return
+	}
+	// Snapshot the player ID and the current active index so the goroutine can
+	// verify nothing changed while it was sleeping.
+	playerID := active.ID
+	activeIdx := g.ActiveIndex
+	go s.runAutoPlay(playerID, activeIdx)
+}
+
+func (s *Server) runAutoPlay(playerID string, activeIdx int) {
+	time.Sleep(1 * time.Second)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.game == nil {
 		return
 	}
-	active := s.game.Players[s.game.ActiveIndex]
-	if active.ID == playerID && !active.Connected {
-		_ = s.game.AutoPlayDisconnected()
-		s.broadcastStateLocked()
+	g := s.game
+	if g.Phase == game.PhaseRoundEnd || g.Phase == game.PhaseGameOver {
+		return
 	}
+	// Guard: the active player must still be the same disconnected player.
+	if g.ActiveIndex != activeIdx {
+		return
+	}
+	active := g.Players[g.ActiveIndex]
+	if active.ID != playerID || active.Connected {
+		return
+	}
+	if err := g.AutoPlayDisconnected(); err != nil {
+		log.Printf("[server] auto-play error for %s: %v", playerID, err)
+		return
+	}
+	s.broadcastStateLocked()
+	// Chain: if the next player is also disconnected, schedule again.
+	s.scheduleAutoPlayLocked()
 }
 
 // ─── Command dispatch ─────────────────────────────────────────────────────────
@@ -277,6 +418,7 @@ func (s *Server) handleStart(playerID string) {
 	s.started = true
 	log.Printf("[server] Game started with %d players", len(players))
 	s.broadcastStateLocked()
+	s.scheduleAutoPlayLocked()
 }
 
 func (s *Server) handleAction(playerID string, action func() error) {
@@ -289,6 +431,9 @@ func (s *Server) handleAction(playerID string, action func() error) {
 		return
 	}
 	s.broadcastStateLocked()
+	// After any action that may advance the turn, check whether the next active
+	// player is disconnected and schedule auto-play if so.
+	s.scheduleAutoPlayLocked()
 }
 
 func (s *Server) handleNextRound(playerID string) {
@@ -305,6 +450,8 @@ func (s *Server) handleNextRound(playerID string) {
 		return
 	}
 	s.broadcastStateLocked()
+	// New round might start with a disconnected player's turn.
+	s.scheduleAutoPlayLocked()
 }
 
 // ─── Broadcast helpers ────────────────────────────────────────────────────────
@@ -318,9 +465,11 @@ func (s *Server) broadcastLobby() {
 }
 
 func (s *Server) broadcastLobbyLocked() {
-	names := make([]string, len(s.lobby))
-	for i, e := range s.lobby {
-		names[i] = e.name
+	var names []string
+	for _, e := range s.lobby {
+		if e.connected {
+			names = append(names, e.name)
+		}
 	}
 	ls := protocol.LobbyState{
 		Players:    names,
@@ -328,11 +477,13 @@ func (s *Server) broadcastLobbyLocked() {
 		PublicAddr: s.publicAddr,
 	}
 	for _, cl := range s.clients {
-		_ = s.enqueueEnvelope(cl, "lobby", ls)
+		if cl.connected {
+			_ = s.enqueueEnvelope(cl, "lobby", ls)
+		}
 	}
 }
 
-// broadcastStateLocked sends personalized state snapshots to all clients.
+// broadcastStateLocked sends personalized state snapshots to all connected clients.
 // Caller must hold mu.
 func (s *Server) broadcastStateLocked() {
 	if s.game == nil {
@@ -340,6 +491,9 @@ func (s *Server) broadcastStateLocked() {
 		return
 	}
 	for id, cl := range s.clients {
+		if !cl.connected {
+			continue
+		}
 		snap := buildSnapshot(s.game, id)
 		_ = s.enqueueEnvelope(cl, protocol.EvtState, snap)
 	}

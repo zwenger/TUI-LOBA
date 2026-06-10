@@ -147,6 +147,38 @@ El jugador que cierra recibe **0 puntos** en esa ronda.
 
 ---
 
+## Desconexiones y reconexión
+
+### Turno automático al desconectarse
+
+Si un jugador pierde la conexión durante la partida, el servidor juega sus
+turnos automáticamente mientras está desconectado: roba del mazo y descarta
+la carta robada (con ~1 segundo de pausa para que los demás vean el flujo).
+Esto ocurre **cada vez** que le toca el turno — no solo una vez. Si hay
+varios jugadores desconectados consecutivos, los turnos se encadenan.
+El registro de eventos muestra un aviso del estilo *"fulano está
+desconectado — turno automático"* para cada turno auto-jugado.
+
+### Reconexión con el mismo nombre
+
+Un jugador desconectado puede volver a unirse con el mismo comando y el
+**mismo nombre de pantalla**:
+
+```sh
+./loba join <dirección> --name MismoNombre
+```
+
+El servidor reconoce el nombre (sin distinguir mayúsculas), reestablece la
+conexión en el mismo lugar, y envía al jugador una instantánea fresca del
+estado. La mano y el puntaje se conservan íntegramente. Los demás jugadores
+reciben un aviso de reconexión.
+
+Si el jugador se reconecta justo antes de que se ejecute un turno automático,
+la reconexión tiene prioridad: el servidor verifica el estado de conexión
+antes de auto-jugar.
+
+---
+
 ## Fuentes
 
 - [Pagat.com — Rules of Card Games: Loba](https://www.pagat.com/rummy/loba.html)

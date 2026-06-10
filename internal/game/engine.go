@@ -148,6 +148,13 @@ func (g *Game) addEvent(msg string) {
 	g.Events = append(g.Events, msg)
 }
 
+// AddEvent appends a message to the event log. Use this from outside the
+// package (e.g. the server) to record events that have no corresponding
+// engine action.
+func (g *Game) AddEvent(msg string) {
+	g.addEvent(msg)
+}
+
 // DiscardTop returns the top card of the discard pile.
 func (g *Game) DiscardTop() (Card, bool) {
 	if len(g.DiscardPile) == 0 {
@@ -388,7 +395,7 @@ func (g *Game) AutoPlayDisconnected() error {
 	if g.Phase == PhaseMelding && len(p.Hand) > 0 {
 		card := p.Hand.Remove(len(p.Hand) - 1)
 		g.DiscardPile = append(g.DiscardPile, card)
-		g.addEvent(fmt.Sprintf("%s (desconectado) fue salteado.", p.Name))
+		g.addEvent(fmt.Sprintf("%s está desconectado — turno automático.", p.Name))
 		g.advanceTurn()
 	}
 	return nil

@@ -487,6 +487,138 @@ func TestEngineDisconnectedAutoPlay(t *testing.T) {
 	}
 }
 
+// TestEngineDisconnectedAutoPlayRepeated verifies that a disconnected player
+// keeps getting auto-played every time the turn returns to them, until they
+// reconnect or the game ends.
+func TestEngineDisconnectedAutoPlayRepeated(t *testing.T) {
+	players := []struct{ ID, Name string }{
+		{"p1", "Alice"},
+		{"p2", "Bob"},
+		{"p3", "Carol"},
+	}
+	g, err := NewGame(players, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Alice disconnects immediately.
+	g.Players[0].Connected = false
+
+	// Run 6 auto-plays of Alice (2 full laps around the 3-player table).
+	autoPlaysForAlice := 0
+	for i := 0; i < 12; i++ {
+		if g.Phase == PhaseRoundEnd || g.Phase == PhaseGameOver {
+			break
+		}
+		active := g.activePlayer()
+		if active.ID == "p1" {
+			// Alice's turn: must auto-play.
+			if active.Connected {
+				t.Fatal("Alice should still be disconnected")
+			}
+			if err := g.AutoPlayDisconnected(); err != nil {
+				t.Fatalf("AutoPlayDisconnected on turn %d: %v", i, err)
+			}
+			autoPlaysForAlice++
+		} else {
+			// Bob or Carol: draw from stock and discard the drawn card.
+			// Try each card index in reverse until one is discardable (jokers
+			// cannot be discarded while other non-joker cards remain in hand).
+			if err := g.DrawStock(active.ID); err != nil {
+				t.Fatalf("DrawStock %s turn %d: %v", active.ID, i, err)
+			}
+			discarded := false
+			for idx := len(active.Hand) - 1; idx >= 0; idx-- {
+				if err := g.Discard(active.ID, idx); err == nil {
+					discarded = true
+					break
+				}
+			}
+			if !discarded {
+				if g.Phase == PhaseRoundEnd || g.Phase == PhaseGameOver {
+					break
+				}
+				t.Fatalf("could not find a discardable card for %s on turn %d", active.ID, i)
+			}
+			if g.Phase == PhaseRoundEnd || g.Phase == PhaseGameOver {
+				break
+			}
+		}
+	}
+
+	if autoPlaysForAlice < 2 {
+		t.Errorf("expected at least 2 auto-plays for Alice, got %d", autoPlaysForAlice)
+	}
+
+	// Now reconnect Alice: auto-play must stop.
+	g.Players[0].Connected = true
+	// Advance until it is Alice's turn.
+	for g.activePlayer().ID != "p1" {
+		if g.Phase == PhaseRoundEnd || g.Phase == PhaseGameOver {
+			return // game ended before Alice's turn — acceptable
+		}
+		active := g.activePlayer()
+		_ = g.DrawStock(active.ID)
+		// Discard first non-joker card.
+		for idx := 0; idx < len(active.Hand); idx++ {
+			if err := g.Discard(active.ID, idx); err == nil {
+				break
+			}
+		}
+		if g.Phase == PhaseRoundEnd || g.Phase == PhaseGameOver {
+			return
+		}
+	}
+	// AutoPlayDisconnected must now refuse.
+	if err := g.AutoPlayDisconnected(); err == nil {
+		t.Error("expected error when calling AutoPlayDisconnected on a connected player")
+	}
+}
+
+// TestEngineAutoPlayEventLog verifies that the event log records the correct
+// Spanish message when a disconnected player is auto-played.
+func TestEngineAutoPlayEventLog(t *testing.T) {
+	players := []struct{ ID, Name string }{
+		{"p1", "Alice"},
+		{"p2", "Bob"},
+	}
+	g, err := NewGame(players, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g.Players[0].Connected = false
+	_ = g.AutoPlayDisconnected()
+
+	// One of the events must mention the player name and "desconectado".
+	if len(g.Events) == 0 {
+		t.Fatal("expected events after auto-play, got none")
+	}
+	found := false
+	for _, ev := range g.Events {
+		if contains(ev, "Alice") && contains(ev, "desconectado") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no auto-play event found for Alice; events: %v", g.Events)
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsHelper(s, sub))
+}
+
+func containsHelper(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 // ─── Discard-pickup rule tests ────────────────────────────────────────────────
 
 // makeGame builds a 2-player game with Alice as active player in PhaseDrawing.

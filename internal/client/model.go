@@ -160,14 +160,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, readServerMsg(m.reader)
 
 	case connErrMsg:
-		m.lastError = "Connection failed: " + msg.err.Error()
+		// If we were mid-game when the connection dropped, show a rejoin hint.
+		if m.screen == screenGame || m.screen == screenRound || m.screen == screenOver {
+			m.lastError = "conexión perdida — volvé a unirte con el mismo nombre para retomar tu lugar"
+		} else {
+			m.lastError = "No se pudo conectar: " + msg.err.Error()
+		}
+		// Stop trying to read: set conn/reader to nil and don't return a new readServerMsg.
+		m.conn = nil
+		m.reader = nil
 		return m, nil
 
 	case serverMsg:
 		m, cmd := m.handleEnvelope(msg.env)
+		if m.reader == nil {
+			return m, cmd
+		}
 		return m, tea.Batch(cmd, readServerMsg(m.reader))
 
 	case tickMsg:
+		if m.reader == nil {
+			return m, nil
+		}
 		return m, readServerMsg(m.reader)
 
 	case tea.KeyMsg:

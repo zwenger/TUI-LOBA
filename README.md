@@ -185,6 +185,42 @@ index regardless of display order.
 
 ---
 
+## Disconnection handling
+
+### Auto-play for disconnected players
+
+If a player loses their connection mid-game, the server automatically plays
+their turns while they are offline: it draws from the stock and immediately
+discards the drawn card (after a ~1 s delay so other players can see the
+flow). This happens every time the turn reaches them, not just once. If
+consecutive players are all disconnected their turns chain automatically.
+The event log shows a Spanish notice for each auto-played turn.
+
+### Rejoin with the same name
+
+A disconnected player can reconnect at any time using the same join command
+with the same display name:
+
+```sh
+./loba join <host:port> --name SameName
+```
+
+The server matches the name case-insensitively against disconnected seats,
+reattaches the connection, and sends a fresh state snapshot. The hand and
+score are fully preserved. All other players receive a reconnect notice.
+
+If a rejoin attempt arrives just before an auto-play timer fires, reconnecting
+wins: the server checks the `Connected` flag before auto-playing.
+
+**Errors:**
+
+| Situation | Error |
+|-----------|-------|
+| Name not found among disconnected players | "la partida ya comenzó" |
+| Name matches a currently-connected player | "ese nombre ya está en uso" |
+
+---
+
 ## Makefile
 
 ```sh
