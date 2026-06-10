@@ -63,6 +63,7 @@ type screen int
 const (
 	screenName  screen = iota // name entry prompt
 	screenLobby               // waiting room
+	screenSeats               // seat picker (reconnect to a started game)
 	screenGame                // main game table
 	screenRound               // round-end summary
 	screenOver                // game-over / winner
@@ -96,6 +97,10 @@ type Model struct {
 	hostID       string
 	selfID       string
 	publicAddr   string // tunnel public address, non-empty when host used --public
+
+	// seat picker (reconnect to a started game)
+	seats       []protocol.SeatEntry
+	seatCursor  int
 
 	// game state
 	state     *protocol.StateSnapshot
@@ -162,7 +167,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case connErrMsg:
 		// If we were mid-game when the connection dropped, show a rejoin hint.
 		if m.screen == screenGame || m.screen == screenRound || m.screen == screenOver {
-			m.lastError = "conexión perdida — volvé a unirte con el mismo nombre para retomar tu lugar"
+			m.lastError = "conexión perdida — volvé a unirte y elegí tu lugar para retomar"
 		} else {
 			m.lastError = "No se pudo conectar: " + msg.err.Error()
 		}
@@ -200,6 +205,14 @@ func (m Model) handleEnvelope(env protocol.Envelope) (Model, tea.Cmd) {
 			m.hostID = ls.HostID
 			m.publicAddr = ls.PublicAddr
 			m.screen = screenLobby
+		}
+
+	case protocol.EvtSeats:
+		var offer protocol.SeatsOffer
+		if err := json.Unmarshal(env.Payload, &offer); err == nil {
+			m.seats = offer.Seats
+			m.seatCursor = 0
+			m.screen = screenSeats
 		}
 
 	case protocol.EvtState:
@@ -253,8 +266,8 @@ func (m Model) handleEnvelope(env protocol.Envelope) (Model, tea.Cmd) {
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// Global quit.
-	if key == "ctrl+c" || key == "q" && m.screen != screenGame {
+	// Global quit (q works on all screens except in-game where it conflicts with lay-off numbering).
+	if key == "ctrl+c" || (key == "q" && m.screen != screenGame) {
 		return m, tea.Quit
 	}
 
@@ -263,6 +276,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleNameKey(key)
 	case screenLobby:
 		return m.handleLobbyKey(key)
+	case screenSeats:
+		return m.handleSeatsKey(key)
 	case screenGame:
 		return m.handleGameKey(key)
 	case screenRound, screenOver:
@@ -303,6 +318,32 @@ func (m Model) handleLobbyKey(key string) (tea.Model, tea.Cmd) {
 		if m.conn != nil {
 			_ = protocol.WriteJSON(m.conn, protocol.Command{Type: protocol.CmdStart})
 		}
+	}
+	return m, nil
+}
+
+// ─── Seat picker keys ─────────────────────────────────────────────────────────
+
+func (m Model) handleSeatsKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "up", "k":
+		if m.seatCursor > 0 {
+			m.seatCursor--
+		}
+	case "down", "j":
+		if m.seatCursor < len(m.seats)-1 {
+			m.seatCursor++
+		}
+	case "enter":
+		if m.conn != nil && len(m.seats) > 0 {
+			seat := m.seats[m.seatCursor]
+			_ = protocol.WriteJSON(m.conn, protocol.Command{
+				Type:   protocol.CmdClaimSeat,
+				SeatID: seat.ID,
+			})
+		}
+	case "esc", "q", "ctrl+c":
+		return m, tea.Quit
 	}
 	return m, nil
 }
@@ -435,6 +476,8 @@ func (m Model) View() string {
 		return m.viewNameEntry()
 	case screenLobby:
 		return m.viewLobby()
+	case screenSeats:
+		return m.viewSeats()
 	case screenGame:
 		return m.viewGame()
 	case screenRound:
@@ -498,6 +541,36 @@ func (m Model) viewLobby() string {
 		b.WriteString("\n" + styleErr.Render(m.lastError))
 	}
 	b.WriteString("\n\n" + styleHelp.Render("Esperando que el anfitrión inicie la partida..."))
+	return b.String()
+}
+
+// ─── Seat picker view ─────────────────────────────────────────────────────────
+
+func (m Model) viewSeats() string {
+	var b strings.Builder
+	b.WriteString(header())
+	b.WriteString("\n")
+
+	b.WriteString(styleTitle.Render("Elegí tu lugar para volver a la partida") + "\n\n")
+
+	if len(m.seats) == 0 {
+		b.WriteString(styleErr.Render("No hay lugares disponibles.") + "\n")
+	} else {
+		for i, seat := range m.seats {
+			line := fmt.Sprintf("  %-20s  cartas: %d   puntaje: %d",
+				seat.Name, seat.CardCount, seat.Score)
+			if i == m.seatCursor {
+				line = styleSel.Render("▶ " + strings.TrimLeft(line, " "))
+			}
+			b.WriteString(line + "\n")
+		}
+	}
+
+	b.WriteString("\n" + styleHelp.Render("↑ ↓ / k j: mover   Enter: elegir   Esc/Q: salir"))
+
+	if m.lastError != "" {
+		b.WriteString("\n" + styleErr.Render(m.lastError))
+	}
 	return b.String()
 }
 

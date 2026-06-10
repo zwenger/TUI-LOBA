@@ -78,9 +78,46 @@ Scores accumulate across rounds. When **any** player's cumulative total exceeds
 
 ---
 
-## Build
+## Quick start (recommended)
 
-Requires Go 1.21+ (tested on Go 1.26).
+Clone the repo once — `play.sh` keeps it up to date automatically:
+
+```sh
+git clone <repo>
+cd loba
+./play.sh host --name Alvaro          # host a game
+./play.sh join 192.168.1.42:7777 --name Pablo   # join a game
+```
+
+`play.sh` runs `git pull --ff-only`, rebuilds the binary, then launches it.
+If the pull fails (offline or diverged), it prints a Spanish warning and
+continues with the current build. If the build fails it aborts with a clear
+message.
+
+Requires **Go 1.21+** installed (tested on Go 1.26).
+
+**Windows users:** Git Bash supports the same `./play.sh` invocation, or
+run the three steps manually:
+
+```bat
+git pull --ff-only
+go build -o loba.exe .
+loba.exe host --name Alvaro
+```
+
+### Alternative: pre-built binaries
+
+Download a binary from the releases page and run it directly — no Go
+installation needed.
+
+```sh
+./loba host --port 7777 --name Alvaro
+./loba join 192.168.1.42:7777 --name Pablo
+```
+
+---
+
+## Build manually
 
 ```sh
 git clone <repo>
@@ -97,7 +134,8 @@ Or use the Makefile targets below.
 ### Host a game
 
 ```sh
-./loba host --port 7777 --name Alvaro
+./play.sh host --port 7777 --name Alvaro
+# or: ./loba host --port 7777 --name Alvaro
 ```
 
 - Starts a TCP server on port 7777 and joins as the first player.
@@ -107,7 +145,8 @@ Or use the Makefile targets below.
 ### Join a game
 
 ```sh
-./loba join 192.168.1.42:7777 --name Pablo
+./play.sh join 192.168.1.42:7777 --name Pablo
+# or: ./loba join 192.168.1.42:7777 --name Pablo
 ```
 
 ### Remote friends (LAN or port-forward)
@@ -196,28 +235,35 @@ flow). This happens every time the turn reaches them, not just once. If
 consecutive players are all disconnected their turns chain automatically.
 The event log shows a Spanish notice for each auto-played turn.
 
-### Rejoin with the same name
+### Seat-picker reconnection
 
-A disconnected player can reconnect at any time using the same join command
-with the same display name:
+When a player disconnects and rejoins, a **seat selection screen** appears
+instead of jumping straight back to the table. The screen lists every
+disconnected seat (player name, cards in hand, accumulated score) and the
+player picks their own seat with the arrow keys:
 
 ```sh
-./loba join <host:port> --name SameName
+./play.sh join <host:port>
+# or: ./loba join <host:port>   (--name is ignored for reconnection)
 ```
 
-The server matches the name case-insensitively against disconnected seats,
-reattaches the connection, and sends a fresh state snapshot. The hand and
-score are fully preserved. All other players receive a reconnect notice.
+1. The server detects that the game has already started.
+2. It sends the list of available (disconnected) seats.
+3. The TUI shows "Elegí tu lugar para volver a la partida".
+4. The player moves with `↑ ↓` (or `k j`) and confirms with `Enter`.
+5. The server reattaches the connection to that seat — hand and score are
+   fully preserved — and broadcasts "X se reconectó." to all players.
 
-If a rejoin attempt arrives just before an auto-play timer fires, reconnecting
-wins: the server checks the `Connected` flag before auto-playing.
+**Race handling:** if two clients claim the same seat simultaneously the
+first one wins atomically. The loser receives an error and a refreshed seat
+list (or a no-seats error if none remain).
 
 **Errors:**
 
-| Situation | Error |
-|-----------|-------|
-| Name not found among disconnected players | "la partida ya comenzó" |
-| Name matches a currently-connected player | "ese nombre ya está en uso" |
+| Situation | Server response |
+|-----------|-----------------|
+| No disconnected seats (everyone is connected) | "la partida ya comenzó y no hay lugares libres" |
+| Claimed seat was taken by someone else | error + refreshed seat list |
 
 ---
 

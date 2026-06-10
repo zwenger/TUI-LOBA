@@ -20,15 +20,25 @@ import (
 
 // Server manages one Loba game session.
 type Server struct {
-	mu         sync.Mutex
-	game       *game.Game
-	clients    map[string]*client // keyed by player ID
-	hostID     string
-	lobby      []lobbyEntry // ordered player join list
-	started    bool
-	port       string
-	hostName   string
+	mu       sync.Mutex
+	game     *game.Game
+	clients  map[string]*client  // keyed by player ID
+	pending  map[string]*pending // keyed by pendingID; clients picking a seat
+	hostID   string
+	lobby    []lobbyEntry // ordered player join list
+	started  bool
+	port     string
+	hostName string
 	publicAddr string // bore.pub public address, empty when --public is not used
+}
+
+// pending represents a connection that has joined a started game and is in the
+// process of picking a disconnected seat. It is not yet attached to any player.
+type pending struct {
+	id   string   // unique pending connection ID (not a player ID)
+	conn net.Conn
+	send chan []byte
+	done chan struct{} // closed by writePump when it exits
 }
 
 type lobbyEntry struct {
@@ -48,8 +58,9 @@ type client struct {
 // New creates a new server that will listen on the given port.
 func New(port, hostName string) *Server {
 	return &Server{
-		clients:  make(map[string]*client),
-		port:     port,
+		clients: make(map[string]*client),
+		pending: make(map[string]*pending),
+		port:    port,
 		hostName: hostName,
 	}
 }
@@ -111,17 +122,24 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
-	playerID, isRejoin, err := s.registerPlayer(conn, cmd.Name)
+	// Check if this join targets a started game — if so, route to the seat-picker flow.
+	s.mu.Lock()
+	isStarted := s.started
+	s.mu.Unlock()
+
+	if isStarted {
+		s.handleConnStartedGame(conn, r, cmd.Name)
+		return
+	}
+
+	// Lobby join flow.
+	playerID, _, err := s.registerPlayer(conn, cmd.Name)
 	if err != nil {
 		_ = protocol.SendError(conn, err.Error())
 		return
 	}
 
-	if isRejoin {
-		log.Printf("[server] %s reconnected as %s", conn.RemoteAddr(), cmd.Name)
-	} else {
-		log.Printf("[server] %s joined as %s", conn.RemoteAddr(), cmd.Name)
-	}
+	log.Printf("[server] %s joined as %s", conn.RemoteAddr(), cmd.Name)
 
 	// Start the outbound writer goroutine.
 	s.mu.Lock()
@@ -129,22 +147,8 @@ func (s *Server) handleConn(conn net.Conn) {
 	s.mu.Unlock()
 	go cl.writePump()
 
-	if isRejoin {
-		// Send a fresh state snapshot and broadcast reconnection to all players.
-		s.mu.Lock()
-		if s.game != nil {
-			p := s.game.PlayerByID(playerID)
-			if p != nil {
-				msg := fmt.Sprintf("%s se reconectó.", p.Name)
-				s.game.AddEvent(msg)
-			}
-		}
-		s.broadcastStateLocked()
-		s.mu.Unlock()
-	} else {
-		// Broadcast updated lobby state for a fresh join.
-		s.broadcastLobby()
-	}
+	// Broadcast updated lobby state for a fresh join.
+	s.broadcastLobby()
 
 	// Read loop.
 	for {
@@ -160,16 +164,109 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-// registerPlayer registers a new player or reattaches a reconnecting one.
-// Returns (playerID, isRejoin, error).
+// handleConnStartedGame handles a new connection that arrives after the game
+// has already started. It sends the available disconnected seats and waits for
+// the client to claim one.
+func (s *Server) handleConnStartedGame(conn net.Conn, r *bufio.Reader, _ string) {
+	// Build the list of available (disconnected) seats under the lock.
+	s.mu.Lock()
+	seats := s.availableSeatsLocked()
+	s.mu.Unlock()
+
+	if len(seats) == 0 {
+		_ = protocol.SendError(conn, "la partida ya comenzó y no hay lugares libres")
+		return
+	}
+
+	// Register as a pending connection (not yet a player).
+	pendingID := fmt.Sprintf("pending-%d", time.Now().UnixNano())
+	pnd := &pending{
+		id:   pendingID,
+		conn: conn,
+		send: make(chan []byte, 64),
+		done: make(chan struct{}),
+	}
+	s.mu.Lock()
+	s.pending[pendingID] = pnd
+	s.mu.Unlock()
+
+	go pnd.writePump()
+
+	// Send the seat list.
+	offer := protocol.SeatsOffer{Seats: seats}
+	if err := s.enqueueEnvelopePending(pnd, protocol.EvtSeats, offer); err != nil {
+		s.removePending(pendingID)
+		return
+	}
+
+	log.Printf("[server] %s is picking a seat", conn.RemoteAddr())
+
+	// Wait for a claim_seat command (ignore everything else).
+	for {
+		var incoming protocol.Command
+		if err := protocol.ReadJSON(r, &incoming); err != nil {
+			log.Printf("[server] Pending client disconnected before claiming a seat")
+			s.removePending(pendingID)
+			return
+		}
+		if incoming.Type != protocol.CmdClaimSeat {
+			continue
+		}
+
+		// Attempt to claim the seat.
+		playerID, err := s.claimSeat(conn, pendingID, incoming.SeatID)
+		if err != nil {
+			// Could be a race (seat taken) or invalid ID — tell the client and
+			// send a refreshed seat list so they can pick again.
+			_ = s.enqueueEnvelopePending(pnd, protocol.EvtError, map[string]string{"message": err.Error()})
+
+			s.mu.Lock()
+			refreshed := s.availableSeatsLocked()
+			s.mu.Unlock()
+
+			if len(refreshed) == 0 {
+				_ = s.enqueueEnvelopePending(pnd, protocol.EvtError, map[string]string{"message": "la partida ya comenzó y no hay lugares libres"})
+				s.removePending(pendingID)
+				return
+			}
+			_ = s.enqueueEnvelopePending(pnd, protocol.EvtSeats, protocol.SeatsOffer{Seats: refreshed})
+			continue
+		}
+
+		// Claimed successfully: the pending entry is now gone and a real client entry exists.
+		log.Printf("[server] %s claimed seat %s", conn.RemoteAddr(), playerID)
+
+		s.mu.Lock()
+		if s.game != nil {
+			p := s.game.PlayerByID(playerID)
+			if p != nil {
+				msg := fmt.Sprintf("%s se reconectó.", p.Name)
+				s.game.AddEvent(msg)
+			}
+		}
+		s.broadcastStateLocked()
+		s.mu.Unlock()
+
+		// Switch the send channel to the real client; hand off to the normal read loop.
+		for {
+			var incoming protocol.Command
+			if err := protocol.ReadJSON(r, &incoming); err != nil {
+				if err != io.EOF {
+					log.Printf("[server] Read error from %s: %v", playerID, err)
+				}
+				s.markDisconnected(playerID)
+				return
+			}
+			s.handleCommand(playerID, incoming)
+		}
+	}
+}
+
+// registerPlayer registers a new lobby player. Only called during the lobby phase.
+// Returns (playerID, false, error). The bool is kept for API consistency.
 func (s *Server) registerPlayer(conn net.Conn, name string) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if s.started {
-		// Game is running: only allow reconnect (same name, disconnected seat).
-		return s.handleRejoin(conn, name)
-	}
 
 	// Lobby phase: reject duplicate connected names.
 	for _, e := range s.lobby {
@@ -224,40 +321,107 @@ func (s *Server) registerPlayer(conn net.Conn, name string) (string, bool, error
 	return id, false, nil
 }
 
-// handleRejoin attempts to reattach a reconnecting player during an active game.
+// availableSeatsLocked returns the list of disconnected player seats.
 // Caller must hold mu.
-func (s *Server) handleRejoin(conn net.Conn, name string) (string, bool, error) {
-	if name == "" {
-		return "", false, fmt.Errorf("la partida ya comenzó")
+func (s *Server) availableSeatsLocked() []protocol.SeatEntry {
+	if s.game == nil {
+		return nil
 	}
-
-	// Check for a connected player with the same name (duplicate rejection).
-	for _, cl := range s.clients {
-		if cl.connected && strings.EqualFold(cl.name, name) {
-			return "", false, fmt.Errorf("ese nombre ya está en uso")
+	var seats []protocol.SeatEntry
+	for _, p := range s.game.Players {
+		if !p.Connected {
+			seats = append(seats, protocol.SeatEntry{
+				ID:        p.ID,
+				Name:      p.Name,
+				CardCount: len(p.Hand),
+				Score:     p.TotalScore,
+			})
 		}
 	}
+	return seats
+}
 
-	// Look for a disconnected game player with a matching name.
-	if s.game != nil {
-		for _, p := range s.game.Players {
-			if !p.Connected && strings.EqualFold(p.Name, name) {
-				// Reattach: create a new send channel and bind the new connection.
-				newCl := &client{
-					id:        p.ID,
-					name:      p.Name,
-					conn:      conn,
-					send:      make(chan []byte, 64),
-					connected: true,
-				}
-				s.clients[p.ID] = newCl
-				p.Connected = true
-				return p.ID, true, nil
-			}
-		}
+// claimSeat atomically claims a disconnected seat for the pending connection.
+// It removes the pending entry and creates a proper client entry.
+// Returns the playerID on success, or an error if the seat is gone.
+func (s *Server) claimSeat(conn net.Conn, pendingID, seatID string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pnd, ok := s.pending[pendingID]
+	if !ok {
+		return "", fmt.Errorf("conexión pendiente no encontrada")
 	}
 
-	return "", false, fmt.Errorf("la partida ya comenzó")
+	if s.game == nil {
+		return "", fmt.Errorf("la partida no está en curso")
+	}
+
+	// Re-check under the lock: seat must still be disconnected.
+	var target *game.Player
+	for _, p := range s.game.Players {
+		if p.ID == seatID {
+			target = p
+			break
+		}
+	}
+	if target == nil {
+		return "", fmt.Errorf("lugar no encontrado")
+	}
+	if target.Connected {
+		return "", fmt.Errorf("ese lugar ya fue tomado — elegí otro")
+	}
+
+	// Reuse the pending send channel so the writePump already running keeps working.
+	newCl := &client{
+		id:        target.ID,
+		name:      target.Name,
+		conn:      conn,
+		send:      pnd.send, // hand off the channel — writePump is already running it
+		connected: true,
+	}
+	s.clients[target.ID] = newCl
+	target.Connected = true
+
+	delete(s.pending, pendingID)
+
+	return target.ID, nil
+}
+
+// removePending closes and removes a pending connection entry.
+// It waits for the writePump to drain before returning so that any queued
+// error messages are fully written before the caller's deferred conn.Close fires.
+func (s *Server) removePending(pendingID string) {
+	s.mu.Lock()
+	pnd, ok := s.pending[pendingID]
+	if ok {
+		delete(s.pending, pendingID)
+	}
+	s.mu.Unlock()
+
+	if ok {
+		close(pnd.send)
+		<-pnd.done // wait for writePump to flush and exit
+	}
+}
+
+// enqueueEnvelopePending sends an envelope to a pending (not-yet-claimed) connection.
+func (s *Server) enqueueEnvelopePending(pnd *pending, evtType string, payload any) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	env := protocol.Envelope{Type: evtType, Payload: raw}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	select {
+	case pnd.send <- data:
+	default:
+	}
+	return nil
 }
 
 func (s *Server) markDisconnected(playerID string) {
@@ -547,6 +711,15 @@ func (s *Server) enqueueEnvelope(cl *client, evtType string, payload any) error 
 func (cl *client) writePump() {
 	for data := range cl.send {
 		if _, err := cl.conn.Write(data); err != nil {
+			break
+		}
+	}
+}
+
+func (pnd *pending) writePump() {
+	defer close(pnd.done)
+	for data := range pnd.send {
+		if _, err := pnd.conn.Write(data); err != nil {
 			break
 		}
 	}

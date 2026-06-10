@@ -21,6 +21,7 @@ const (
 	CmdDiscard     = "discard"
 	CmdChat        = "chat"
 	CmdNextRound   = "next_round"
+	CmdClaimSeat   = "claim_seat" // reconnection: claim a disconnected seat by ID
 )
 
 // Command is a message sent from a client to the server.
@@ -29,6 +30,9 @@ type Command struct {
 
 	// join
 	Name string `json:"name,omitempty"`
+
+	// claim_seat
+	SeatID string `json:"seat_id,omitempty"`
 
 	// meld / lay_off / discard
 	CardIndexes []int  `json:"card_indexes,omitempty"`
@@ -46,6 +50,7 @@ const (
 	EvtState   = "state"
 	EvtError   = "error"
 	EvtMessage = "message"
+	EvtSeats   = "seats" // server→client: list of available disconnected seats
 )
 
 // CardView is a client-visible representation of a card.
@@ -113,7 +118,23 @@ type LobbyState struct {
 	HostID     string   `json:"host_id"`
 	// PublicAddr is the bore.pub TCP address friends can use to join from outside
 	// the LAN (e.g. "0.tcp.bore.pub.io:12345"). Empty when --public was not used.
-	PublicAddr string   `json:"public_addr,omitempty"`
+	PublicAddr string `json:"public_addr,omitempty"`
+}
+
+// ─── Seat-picker messages ─────────────────────────────────────────────────────
+
+// SeatEntry describes one available (disconnected) seat offered to a rejoining player.
+type SeatEntry struct {
+	ID        string `json:"id"`         // stable player ID (e.g. "p2")
+	Name      string `json:"name"`       // display name of the original player
+	CardCount int    `json:"card_count"` // cards currently in hand
+	Score     int    `json:"score"`      // accumulated total score
+}
+
+// SeatsOffer is sent by the server when a client joins a game that has already
+// started. The client presents the list and the player picks a seat to claim.
+type SeatsOffer struct {
+	Seats []SeatEntry `json:"seats"`
 }
 
 // ─── Wire helpers ─────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"loba/internal/protocol"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -178,61 +179,109 @@ func drainLobby(t *testing.T, r *bufio.Reader) {
 	}
 }
 
+// drainUntilSeats reads envelopes until a "seats" envelope arrives.
+func drainUntilSeats(t *testing.T, r *bufio.Reader) protocol.SeatsOffer {
+	t.Helper()
+	for {
+		env := readEnvelope(t, r)
+		if env.Type == protocol.EvtSeats {
+			var offer protocol.SeatsOffer
+			if err := json.Unmarshal(env.Payload, &offer); err != nil {
+				t.Fatalf("unmarshal seats offer: %v", err)
+			}
+			return offer
+		}
+	}
+}
+
+// joinStartedGame connects to a started game and returns the conn, reader, and
+// the initial seat offer sent by the server.
+func joinStartedGame(t *testing.T, addr string) (net.Conn, *bufio.Reader, protocol.SeatsOffer) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	r := bufio.NewReader(conn)
+	if err := protocol.WriteJSON(conn, protocol.Command{Type: protocol.CmdJoin}); err != nil {
+		t.Fatalf("join write: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	offer := drainUntilSeats(t, r)
+	return conn, r, offer
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-// TestReconnectHandAndScorePreserved: Alice joins, game starts, Alice
-// disconnects, rejoins with the same name, and her hand + score are intact.
-func TestReconnectHandAndScorePreserved(t *testing.T) {
+// TestReconnectSeatPickerHandAndScorePreserved: Alice joins, game starts, Alice
+// disconnects, reconnects via the seat picker, claims her seat, and her hand +
+// score are preserved.
+func TestReconnectSeatPickerHandAndScorePreserved(t *testing.T) {
 	_, addr := startServer(t)
 
 	// Alice joins first and becomes host.
 	aliceConn, aliceR := dialAndJoin(t, addr, "Alice")
-
-	// Drain Alice's own lobby message.
 	drainLobby(t, aliceR)
 
 	// Bob joins.
 	bobConn, bobR := dialAndJoin(t, addr, "Bob")
 	_, _ = bobConn, bobR
-
-	// Drain Alice's lobby update when Bob joins.
 	drainLobby(t, aliceR)
 
-	// Alice is host — start the game.
+	// Alice starts the game.
 	if err := protocol.WriteJSON(aliceConn, protocol.Command{Type: protocol.CmdStart}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-
-	// Drain until Alice receives a state snapshot.
 	snap := drainUntilState(t, aliceR)
 	if snap.Phase == "" {
 		t.Fatal("expected non-empty phase")
 	}
-	// Record Alice's initial hand size.
 	initialHandSize := len(snap.Hand)
 	if initialHandSize == 0 {
 		t.Fatal("expected non-empty hand")
 	}
+	aliceID := ""
+	for _, p := range snap.Players {
+		if p.IsSelf {
+			aliceID = p.ID
+		}
+	}
 
 	// Drop Alice's connection.
 	aliceConn.Close()
-
-	// Give the server a moment to process the disconnect.
 	time.Sleep(100 * time.Millisecond)
 
-	// Alice reconnects with the same name.
-	aliceConn2, aliceR2 := dialAndJoin(t, addr, "Alice")
-	_ = aliceConn2
+	// Alice reconnects: expects a seat offer, not a direct state snapshot.
+	aliceConn2, aliceR2, offer := joinStartedGame(t, addr)
 
-	// Read the fresh state snapshot sent on reconnect.
+	if len(offer.Seats) == 0 {
+		t.Fatal("expected at least one seat in the offer")
+	}
+
+	// Find Alice's seat by ID.
+	foundSeat := false
+	for _, seat := range offer.Seats {
+		if seat.ID == aliceID {
+			foundSeat = true
+			// Claim Alice's seat.
+			if err := protocol.WriteJSON(aliceConn2, protocol.Command{
+				Type:   protocol.CmdClaimSeat,
+				SeatID: seat.ID,
+			}); err != nil {
+				t.Fatalf("claim seat: %v", err)
+			}
+			break
+		}
+	}
+	if !foundSeat {
+		t.Fatalf("Alice's seat (ID %s) not found in offer %+v", aliceID, offer)
+	}
+
+	// After claiming, should receive a state snapshot.
 	snap2 := drainUntilState(t, aliceR2)
-
-	// Hand size must be preserved.
 	if len(snap2.Hand) != initialHandSize {
 		t.Errorf("hand size after rejoin: got %d, want %d", len(snap2.Hand), initialHandSize)
 	}
-
-	// The player must appear as Connected in the snapshot.
 	for _, p := range snap2.Players {
 		if p.IsSelf && !p.Connected {
 			t.Error("expected Connected=true after rejoin")
@@ -240,31 +289,140 @@ func TestReconnectHandAndScorePreserved(t *testing.T) {
 	}
 }
 
-// TestReconnectWrongNameRejected: a join during an active game with an unknown
-// name must be rejected.
-func TestReconnectWrongNameRejected(t *testing.T) {
+// TestReconnectNoFreeSeats: a join during an active game when no player is
+// disconnected must be rejected with a clear error.
+func TestReconnectNoFreeSeats(t *testing.T) {
 	_, addr := startServer(t)
 
 	aliceConn, aliceR := dialAndJoin(t, addr, "Alice")
-	drainLobby(t, aliceR) // Alice's own join
+	drainLobby(t, aliceR)
 	bobConn, bobR := dialAndJoin(t, addr, "Bob")
 	_, _ = bobConn, bobR
-	drainLobby(t, aliceR) // Bob joined
+	drainLobby(t, aliceR)
 
 	if err := protocol.WriteJSON(aliceConn, protocol.Command{Type: protocol.CmdStart}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	drainUntilState(t, aliceR)
+	// Alice and Bob are both still connected — no free seats.
+
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	if err := protocol.WriteJSON(conn, protocol.Command{Type: protocol.CmdJoin}); err != nil {
+		t.Fatalf("join write: %v", err)
+	}
+	errMsg := drainUntilError(t, r)
+	if !strings.Contains(errMsg, "no hay lugares libres") {
+		t.Errorf("unexpected error %q; want 'no hay lugares libres'", errMsg)
+	}
+}
+
+// TestReconnectClaimRacedSeat: two clients join a game where only one seat is
+// disconnected. The first to claim wins; the second gets an error.
+// We verify this property without assuming which connection wins the race.
+func TestReconnectClaimRacedSeat(t *testing.T) {
+	_, addr := startServer(t)
+
+	aliceConn, aliceR := dialAndJoin(t, addr, "Alice")
+	drainLobby(t, aliceR)
+	bobConn, bobR := dialAndJoin(t, addr, "Bob")
+	_, _ = bobConn, bobR
+	drainLobby(t, aliceR)
+
+	if err := protocol.WriteJSON(aliceConn, protocol.Command{Type: protocol.CmdStart}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	snap := drainUntilState(t, aliceR)
+	aliceID := ""
+	for _, p := range snap.Players {
+		if p.IsSelf {
+			aliceID = p.ID
+		}
+	}
+
+	// Drop Alice so her seat becomes available.
 	aliceConn.Close()
 	time.Sleep(100 * time.Millisecond)
 
-	// Try to join with a different name during the active game.
-	conn, r := dialAndJoin(t, addr, "Charlie")
-	errMsg := drainUntilError(t, r)
-	conn.Close()
+	// Two newcomers race to claim Alice's seat.
+	conn1, r1, offer1 := joinStartedGame(t, addr)
+	conn2, r2, offer2 := joinStartedGame(t, addr)
 
-	if errMsg == "" {
-		t.Error("expected an error message for unknown-name rejoin")
+	if len(offer1.Seats) == 0 || len(offer2.Seats) == 0 {
+		t.Fatal("expected seats in both offers")
+	}
+
+	// Both try to claim the same seat.
+	claimAlice := protocol.Command{Type: protocol.CmdClaimSeat, SeatID: aliceID}
+	if err := protocol.WriteJSON(conn1, claimAlice); err != nil {
+		t.Fatalf("conn1 claim: %v", err)
+	}
+	if err := protocol.WriteJSON(conn2, claimAlice); err != nil {
+		t.Fatalf("conn2 claim: %v", err)
+	}
+
+	// One connection wins (gets a state snapshot) and the other loses (gets an error).
+	// We read from both without assuming order: use channels with a timeout.
+	type result struct {
+		gotState bool
+		gotError bool
+	}
+	readResult := func(r *bufio.Reader) result {
+		for {
+			done := make(chan protocol.Envelope, 1)
+			go func() {
+				var env protocol.Envelope
+				if err := protocol.ReadJSON(r, &env); err == nil {
+					done <- env
+				} else {
+					close(done)
+				}
+			}()
+			select {
+			case env, ok := <-done:
+				if !ok {
+					return result{} // EOF / closed
+				}
+				if env.Type == protocol.EvtState {
+					return result{gotState: true}
+				}
+				if env.Type == protocol.EvtError {
+					return result{gotError: true}
+				}
+				// seats refresh or other — keep reading
+			case <-time.After(3 * time.Second):
+				return result{}
+			}
+		}
+	}
+
+	res1 := readResult(r1)
+	res2 := readResult(r2)
+
+	winners := 0
+	losers := 0
+	if res1.gotState {
+		winners++
+	}
+	if res1.gotError {
+		losers++
+	}
+	if res2.gotState {
+		winners++
+	}
+	if res2.gotError {
+		losers++
+	}
+
+	if winners != 1 {
+		t.Errorf("expected exactly 1 winner, got %d", winners)
+	}
+	if losers != 1 {
+		t.Errorf("expected exactly 1 loser, got %d", losers)
 	}
 }
 

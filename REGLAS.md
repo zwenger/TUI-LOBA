@@ -159,23 +159,41 @@ varios jugadores desconectados consecutivos, los turnos se encadenan.
 El registro de eventos muestra un aviso del estilo *"fulano está
 desconectado — turno automático"* para cada turno auto-jugado.
 
-### Reconexión con el mismo nombre
+### Reconexión con el selector de lugar
 
-Un jugador desconectado puede volver a unirse con el mismo comando y el
-**mismo nombre de pantalla**:
+Cuando un jugador se desconecta y vuelve a unirse, el juego muestra una
+pantalla de selección de lugar en lugar de volver directamente a la mesa.
+El nombre no importa en esta etapa — el lugar define la identidad del jugador
+que regresa.
 
 ```sh
-./loba join <dirección> --name MismoNombre
+./play.sh join <dirección>
+# o bien: ./loba join <dirección>
 ```
 
-El servidor reconoce el nombre (sin distinguir mayúsculas), reestablece la
-conexión en el mismo lugar, y envía al jugador una instantánea fresca del
-estado. La mano y el puntaje se conservan íntegramente. Los demás jugadores
-reciben un aviso de reconexión.
+1. El servidor detecta que la partida ya comenzó y envía la lista de lugares
+   disponibles (jugadores desconectados).
+2. El cliente muestra la pantalla **"Elegí tu lugar para volver a la partida"**
+   con nombre, cantidad de cartas y puntaje de cada lugar libre.
+3. El jugador elige con `↑ ↓` y confirma con `Enter`.
+4. El servidor reestablece la conexión en ese lugar: la mano y el puntaje
+   se conservan íntegramente. Los demás jugadores reciben el aviso
+   *"Fulano se reconectó."*
 
 Si el jugador se reconecta justo antes de que se ejecute un turno automático,
 la reconexión tiene prioridad: el servidor verifica el estado de conexión
 antes de auto-jugar.
+
+Si dos jugadores intentan reclamar el mismo lugar al mismo tiempo, el primero
+en llegar se queda con él. El segundo recibe un error y una lista actualizada
+de lugares disponibles (o un mensaje de que ya no quedan lugares libres).
+
+**Errores posibles:**
+
+| Situación | Mensaje |
+|-----------|---------|
+| Nadie está desconectado | "la partida ya comenzó y no hay lugares libres" |
+| Lugar reclamado por otra persona | error + lista actualizada |
 
 ---
 
