@@ -444,6 +444,144 @@ func TestDuplicateConnectedNameRejected(t *testing.T) {
 	}
 }
 
+// ─── Lobby disconnection tests ───────────────────────────────────────────────
+
+// drainUntilLobby reads envelopes until a "lobby" envelope arrives and returns
+// the decoded LobbyState.
+func drainUntilLobby(t *testing.T, r *bufio.Reader) protocol.LobbyState {
+	t.Helper()
+	for {
+		env := readEnvelope(t, r)
+		if env.Type == "lobby" {
+			var ls protocol.LobbyState
+			if err := json.Unmarshal(env.Payload, &ls); err != nil {
+				t.Fatalf("unmarshal lobby: %v", err)
+			}
+			return ls
+		}
+	}
+}
+
+// TestLobbyDisconnectRemovesPlayer: Bob joins, then drops his connection.
+// Alice (host) must receive a lobby broadcast that no longer includes Bob.
+func TestLobbyDisconnectRemovesPlayer(t *testing.T) {
+	_, addr := startServer(t)
+
+	// Alice joins first — she is the host.
+	aliceConn, aliceR := dialAndJoin(t, addr, "Alice")
+	drainUntilLobby(t, aliceR) // consume Alice's own join broadcast
+
+	// Bob joins.
+	bobConn, _ := dialAndJoin(t, addr, "Bob")
+	// Alice receives a lobby update showing both players.
+	ls := drainUntilLobby(t, aliceR)
+	if len(ls.Players) != 2 {
+		t.Fatalf("expected 2 players after Bob joins, got %d: %v", len(ls.Players), ls.Players)
+	}
+
+	// Drop Bob's connection abruptly.
+	bobConn.Close()
+
+	// Alice must receive a lobby update that reflects Bob's removal.
+	ls2 := drainUntilLobby(t, aliceR)
+	for _, name := range ls2.Players {
+		if strings.EqualFold(name, "Bob") {
+			t.Errorf("Bob still listed after disconnect: %v", ls2.Players)
+		}
+	}
+	if len(ls2.Players) != 1 {
+		t.Errorf("expected 1 player after Bob disconnects, got %d: %v", len(ls2.Players), ls2.Players)
+	}
+
+	_ = aliceConn
+}
+
+// TestLobbyHostDisconnectPromotion: Alice (host) drops. Bob must receive a
+// lobby broadcast where HostID is Bob's ID (he is promoted).
+func TestLobbyHostDisconnectPromotion(t *testing.T) {
+	_, addr := startServer(t)
+
+	// Alice joins first — she is the host.
+	aliceConn, aliceR := dialAndJoin(t, addr, "Alice")
+	drainUntilLobby(t, aliceR)
+
+	// Bob joins.
+	bobConn, bobR := dialAndJoin(t, addr, "Bob")
+	_ = bobConn
+	// Consume Alice's join-notification and Bob's own join broadcast.
+	drainUntilLobby(t, aliceR)
+	ls := drainUntilLobby(t, bobR)
+
+	// Capture Bob's player ID from the lobby we just received.
+	// The HostID in ls should currently be Alice's ID ("p1").
+	if ls.HostID == "" {
+		t.Fatal("expected non-empty HostID before host disconnects")
+	}
+	aliceHostID := ls.HostID
+
+	// Drop Alice.
+	aliceConn.Close()
+
+	// Bob should receive a lobby broadcast with an updated HostID pointing to him.
+	ls2 := drainUntilLobby(t, bobR)
+	if ls2.HostID == "" {
+		t.Fatal("HostID empty after host disconnected")
+	}
+	if ls2.HostID == aliceHostID {
+		t.Errorf("HostID still %s (Alice's) after she disconnected; expected Bob to be promoted", aliceHostID)
+	}
+}
+
+// TestInGameDisconnectReconnectUnchanged: verify that the existing in-game
+// reconnection flow (seat picker) still works after the lobby-disconnect changes.
+func TestInGameDisconnectReconnectUnchanged(t *testing.T) {
+	_, addr := startServer(t)
+
+	aliceConn, aliceR := dialAndJoin(t, addr, "Alice")
+	drainUntilLobby(t, aliceR)
+	bobConn, bobR := dialAndJoin(t, addr, "Bob")
+	_, _ = bobConn, bobR
+	drainUntilLobby(t, aliceR)
+
+	if err := protocol.WriteJSON(aliceConn, protocol.Command{Type: protocol.CmdStart}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	snap := drainUntilState(t, aliceR)
+	aliceID := ""
+	for _, p := range snap.Players {
+		if p.IsSelf {
+			aliceID = p.ID
+		}
+	}
+
+	// Drop Alice mid-game.
+	aliceConn.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Reconnect via seat picker.
+	aliceConn2, aliceR2, offer := joinStartedGame(t, addr)
+	_ = aliceConn2
+	if len(offer.Seats) == 0 {
+		t.Fatal("expected at least one seat")
+	}
+	for _, seat := range offer.Seats {
+		if seat.ID == aliceID {
+			if err := protocol.WriteJSON(aliceConn2, protocol.Command{
+				Type:   protocol.CmdClaimSeat,
+				SeatID: seat.ID,
+			}); err != nil {
+				t.Fatalf("claim seat: %v", err)
+			}
+			break
+		}
+	}
+
+	snap2 := drainUntilState(t, aliceR2)
+	if snap2.Phase == "" {
+		t.Fatal("expected non-empty phase after reconnect")
+	}
+}
+
 // ─── Round reveal snapshot tests ─────────────────────────────────────────────
 
 // TestSnapshotNoRevealDuringPlay verifies that RoundReveal is absent from

@@ -96,14 +96,14 @@ message.
 
 Requires **Go 1.21+** installed (tested on Go 1.26).
 
-**Windows users:** Git Bash supports the same `./play.sh` invocation, or
-run the three steps manually:
+**Windows users:** use `play.ps1` from PowerShell (requires Go and Git):
 
-```bat
-git pull --ff-only
-go build -o loba.exe .
-loba.exe host --name Alvaro
+```powershell
+.\play.ps1 host --name Alvaro
+.\play.ps1 join <host:port> --name Pablo
 ```
+
+Git Bash users can also run the same `./play.sh` invocation as on Linux/macOS.
 
 ### Alternative: pre-built binaries
 

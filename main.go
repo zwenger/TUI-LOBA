@@ -13,6 +13,7 @@ import (
 	"loba/internal/server"
 	"loba/internal/tunnel"
 	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -84,25 +85,39 @@ func runHost(args []string) {
 	// Small delay to let the server start listening.
 	time.Sleep(150 * time.Millisecond)
 
+	m := client.New(localAddr, *name)
+	p := tea.NewProgram(m, tea.WithAltScreen())
+
 	// Open the tunnel (no-op when --public is not set).
+	// progCh delivers the *Program to the tunnel goroutine once it exists,
+	// so p.Println can be called safely after the TUI is running.
 	if *public {
-		go runTunnel(srv, opener)
+		progCh := make(chan *tea.Program, 1)
+		progCh <- p
+		go runTunnel(srv, opener, progCh)
 	}
 
-	runClient(localAddr, *name)
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // runTunnel opens a bore.pub tunnel and starts a second accept loop that feeds
 // connections from the public internet into the same server. The host's own
 // client always connects via localhost — it never goes through the tunnel.
-func runTunnel(srv *server.Server, opener tunnel.Opener) {
-	fmt.Fprintln(os.Stderr, "[tunnel] Opening public TCP tunnel via bore.pub…")
+//
+// progCh must contain the *tea.Program before this function returns so that
+// p.Println can be called safely — that is the Bubbletea-supported way to
+// print above a running viewport into the terminal's scrollback.
+func runTunnel(srv *server.Server, opener tunnel.Opener, progCh <-chan *tea.Program) {
+	fmt.Fprintln(os.Stderr, "[tunnel] Abriendo túnel público via bore.pub…")
 
 	ctx := context.Background()
 	ln, err := opener.Open(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[tunnel] Failed to open tunnel: %v\n", err)
-		fmt.Fprintln(os.Stderr, "[tunnel] Continuing in LAN-only mode — local connections still work.")
+		fmt.Fprintf(os.Stderr, "[tunnel] No se pudo abrir el túnel: %v\n", err)
+		fmt.Fprintln(os.Stderr, "[tunnel] Continuando en modo LAN — las conexiones locales siguen funcionando.")
 		return
 	}
 	if ln == nil {
@@ -112,11 +127,16 @@ func runTunnel(srv *server.Server, opener tunnel.Opener) {
 
 	publicAddr := ln.Addr().String()
 
-	// Print the share block to stdout (outside the TUI, stays in scrollback).
-	printShareBlock(publicAddr)
-
-	// Propagate the address into the lobby so the TUI shows it.
+	// Propagate the address into the lobby so the TUI renders it.
 	srv.SetPublicAddr(publicAddr)
+
+	// Receive the running program and emit the share block into scrollback.
+	// p.Println is the supported Bubbletea mechanism: it queues a printLineMessage
+	// that the renderer flushes above the TUI viewport without corrupting the UI.
+	prog := <-progCh
+	for _, line := range buildShareLines(publicAddr) {
+		prog.Println(line)
+	}
 
 	// Accept loop: hand tunnel connections to the server exactly like LAN ones.
 	for {
@@ -129,25 +149,41 @@ func runTunnel(srv *server.Server, opener tunnel.Opener) {
 	}
 }
 
-
-// printShareBlock prints a ready-to-copy invite block to stdout.
-// It runs before the TUI takes over the terminal, so the text stays in
-// the scrollback buffer and is easy to copy-paste to friends.
-func printShareBlock(addr string) {
-	sep := "──────────────────────────────────────────────────────────"
-	fmt.Println()
-	fmt.Println("── Pasale esto a tus amigos " + sep[28:])
-	fmt.Println()
-	fmt.Println("Linux / macOS:")
-	fmt.Printf("  git clone %s && cd TUI-LOBA && ./play.sh join %s --name TU_NOMBRE\n", repoURL, addr)
-	fmt.Printf("  (si ya lo tenés clonado: cd TUI-LOBA && ./play.sh join %s --name TU_NOMBRE)\n", addr)
-	fmt.Println()
-	fmt.Println("Windows (PowerShell, requiere Go y Git):")
-	fmt.Printf("  git clone %s; cd TUI-LOBA; go build -o loba.exe .; .\\loba.exe join %s --name TU_NOMBRE\n", repoURL, addr)
-	fmt.Printf("  (si ya lo tenés clonado: cd TUI-LOBA; git pull; go build -o loba.exe .; .\\loba.exe join %s --name TU_NOMBRE)\n", addr)
-	fmt.Println()
-	fmt.Println(sep)
-	fmt.Println()
+// buildShareLines returns the ready-to-copy invite block as a slice of strings,
+// one per line. Callers emit each line via p.Println so they land in the
+// terminal scrollback above the TUI viewport.
+func buildShareLines(addr string) []string {
+	sep := strings.Repeat("─", 60)
+	join := func(launcher, extra string) string {
+		return fmt.Sprintf("  git clone %s && cd TUI-LOBA && %s join %s --name TU_NOMBRE%s",
+			repoURL, launcher, addr, extra)
+	}
+	rejoin := func(launcher, extra string) string {
+		return fmt.Sprintf("  (ya clonado: cd TUI-LOBA && %s join %s --name TU_NOMBRE%s)",
+			launcher, addr, extra)
+	}
+	joinPS := func() string {
+		return fmt.Sprintf("  git clone %s; cd TUI-LOBA; .\\play.ps1 join %s --name TU_NOMBRE",
+			repoURL, addr)
+	}
+	rejoinPS := func() string {
+		return fmt.Sprintf("  (ya clonado: cd TUI-LOBA; .\\play.ps1 join %s --name TU_NOMBRE)", addr)
+	}
+	return []string{
+		"",
+		sep,
+		"  Pasale esto a tus amigos:",
+		"",
+		"  Linux / macOS / Windows (Git Bash):",
+		join("./play.sh", ""),
+		rejoin("./play.sh", ""),
+		"",
+		"  Windows (PowerShell):",
+		joinPS(),
+		rejoinPS(),
+		sep,
+		"",
+	}
 }
 
 // ─── Join ─────────────────────────────────────────────────────────────────────
@@ -166,13 +202,7 @@ func runJoin(args []string) {
 	name := fs.String("name", "", "Your display name")
 	_ = fs.Parse(remaining)
 
-	runClient(addr, *name)
-}
-
-// ─── Shared TUI runner ────────────────────────────────────────────────────────
-
-func runClient(addr, name string) {
-	m := client.New(addr, name)
+	m := client.New(addr, *name)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)

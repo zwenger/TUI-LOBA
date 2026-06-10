@@ -778,24 +778,51 @@ func (m Model) viewNameEntry() string {
 
 // ─── Lobby view ───────────────────────────────────────────────────────────────
 
-var stylePublicAddr = lipgloss.NewStyle().
-	Bold(true).
-	Foreground(lipgloss.Color("46")). // bright green
-	Padding(0, 1)
+var (
+	stylePublicAddr = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("46")). // bright green
+		Padding(0, 1)
+
+	// styleShareBox is a left-aligned box with no centering, optimized for
+	// select-and-copy. Monospace rendering is ensured by no padding tricks.
+	styleShareBox = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("46")).
+			Padding(0, 1)
+)
+
+// repoURL mirrors the constant in main.go — kept here to avoid a circular
+// import; the client package has no access to main.
+const repoURL = "https://github.com/zwenger/TUI-LOBA"
 
 func (m Model) viewLobby() string {
 	var b strings.Builder
 	b.WriteString(header())
 	b.WriteString("\n")
 
-	// Public address banner (shown to all clients when the host used --public).
+	// Public address banner + copy-ready share block.
 	if m.publicAddr != "" {
 		banner := stylePublicAddr.Render(
-			"DIRECCIÓN DE LA SALA: " + m.publicAddr + " — compartila con tus amigos",
+			"DIRECCIÓN DE LA SALA: " + m.publicAddr,
 		)
-		b.WriteString(banner + "\n")
-		// One-line reminder that the full share block is in the scrollback.
-		b.WriteString(styleDim.Render("  (el bloque completo con comandos de instalación está más arriba en tu terminal)") + "\n\n")
+		b.WriteString(banner + "\n\n")
+
+		// Share block rendered inside a left-aligned bordered box.
+		// One command per line — no centering — optimized for select+copy.
+		addr := m.publicAddr
+		lines := []string{
+			"Pasale esto a tus amigos:",
+			"",
+			"Linux / macOS / Windows (Git Bash):",
+			fmt.Sprintf("  git clone %s && cd TUI-LOBA && ./play.sh join %s --name TU_NOMBRE", repoURL, addr),
+			fmt.Sprintf("  (ya clonado: cd TUI-LOBA && ./play.sh join %s --name TU_NOMBRE)", addr),
+			"",
+			"Windows (PowerShell):",
+			fmt.Sprintf("  git clone %s; cd TUI-LOBA; .\\play.ps1 join %s --name TU_NOMBRE", repoURL, addr),
+			fmt.Sprintf("  (ya clonado: cd TUI-LOBA; .\\play.ps1 join %s --name TU_NOMBRE)", addr),
+		}
+		b.WriteString(styleShareBox.Render(strings.Join(lines, "\n")) + "\n\n")
 	}
 
 	players := strings.Join(m.lobbyPlayers, "\n  ")

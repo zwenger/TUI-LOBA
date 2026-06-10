@@ -86,6 +86,20 @@ func (s *Server) ListenAndServe() error {
 	return s.Serve(ln)
 }
 
+// enableKeepalive activates TCP keepalives on conn if it is a *net.TCPConn.
+// This ensures that silently dead connections (process kill, network cut) are
+// detected by the OS within ~15 s rather than waiting for the default system
+// timeout (which can be hours). Non-TCP connections (e.g. bore tunnel pipe
+// connections) are skipped safely.
+func enableKeepalive(conn net.Conn) {
+	tc, ok := conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	_ = tc.SetKeepAlive(true)
+	_ = tc.SetKeepAlivePeriod(15 * time.Second)
+}
+
 // Serve accepts connections from an already-open net.Listener and blocks until
 // the listener is closed or the process exits. This allows callers (e.g. a
 // tunnel accept loop) to supply their own listener — including one returned by
@@ -112,6 +126,7 @@ func (s *Server) HandleConn(conn net.Conn) {
 }
 
 func (s *Server) handleConn(conn net.Conn) {
+	enableKeepalive(conn)
 	defer conn.Close()
 	r := bufio.NewReader(conn)
 
@@ -430,20 +445,45 @@ func (s *Server) markDisconnected(playerID string) {
 
 	name := playerID
 	if s.game != nil {
+		// In-game disconnect: mark the game player disconnected so auto-play kicks
+		// in and the seat can be reclaimed via the seat picker.
 		p := s.game.PlayerByID(playerID)
 		if p != nil {
 			p.Connected = false
 			name = p.Name
-			log.Printf("[server] %s disconnected", p.Name)
+			log.Printf("[server] %s disconnected (in-game)", p.Name)
 		}
 	} else {
-		// Lobby disconnect: free the seat so someone else (or a rejoin) can take it.
+		// Lobby disconnect: remove the player from the lobby immediately so the
+		// updated player list is broadcast to everyone still waiting. We also
+		// remove the client map entry — there is nothing to reconnect to in the
+		// lobby (a rejoin just creates a fresh entry via registerPlayer).
 		for i := range s.lobby {
 			if s.lobby[i].id == playerID {
-				s.lobby[i].connected = false
+				name = s.lobby[i].name
+				log.Printf("[server] %s disconnected (lobby)", name)
+				// Remove this entry by swapping with the last element.
+				s.lobby[i] = s.lobby[len(s.lobby)-1]
+				s.lobby = s.lobby[:len(s.lobby)-1]
 				break
 			}
 		}
+
+		// Promote a new host if the disconnecting player was the host.
+		if playerID == s.hostID {
+			s.promoteNextHostLocked()
+		}
+
+		// Clean up the client map entry entirely — no reconnection needed.
+		if cl, ok := s.clients[playerID]; ok {
+			cl.connected = false
+			close(cl.send)
+			delete(s.clients, playerID)
+		}
+
+		// Broadcast the updated lobby to remaining players.
+		s.broadcastLobbyLocked()
+		return
 	}
 
 	if cl, ok := s.clients[playerID]; ok {
@@ -465,6 +505,23 @@ func (s *Server) markDisconnected(playerID string) {
 	s.broadcastStateLocked()
 	// Schedule auto-play if the disconnected player is now the active one.
 	s.scheduleAutoPlayLocked()
+}
+
+// promoteNextHostLocked picks the first remaining connected lobby member as the
+// new host. If the lobby is now empty the server simply waits for new joins —
+// the next player to join will become host via registerPlayer.
+// Caller must hold mu.
+func (s *Server) promoteNextHostLocked() {
+	s.hostID = ""
+	for _, e := range s.lobby {
+		if e.connected {
+			s.hostID = e.id
+			log.Printf("[server] Host disconnected; %s promoted to host", e.name)
+			return
+		}
+	}
+	// Lobby is now empty (or all disconnected). The next join will set hostID.
+	log.Printf("[server] Host disconnected; lobby is empty, waiting for new joins")
 }
 
 // scheduleAutoPlayLocked checks whether the current active player is disconnected
