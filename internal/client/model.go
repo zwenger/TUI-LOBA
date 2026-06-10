@@ -33,6 +33,25 @@ var (
 	styleInput    = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("213")).Padding(0, 1)
 	styleWinner   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226")).Padding(1, 2)
 	stylePickedUp = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")) // orange highlight for picked-up discard
+
+	// Opponent badge styles.
+	styleBadgeNormal = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("63")).
+				Padding(0, 1)
+	styleBadgeActive = lipgloss.NewStyle().
+				Border(lipgloss.ThickBorder()).
+				BorderForeground(lipgloss.Color("226")).
+				Padding(0, 1).
+				Bold(true)
+	styleBadgeDisconn = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("240")).
+				Padding(0, 1)
+	styleBadgeName       = lipgloss.NewStyle().Bold(true)
+	styleBadgeNameActive = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226"))
+	styleBadgeDisconnStr = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	styleBadgeChipSep    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 )
 
 // ─── Sort mode ────────────────────────────────────────────────────────────────
@@ -616,27 +635,140 @@ func (m Model) viewGame() string {
 	return b.String()
 }
 
-func (m Model) renderOpponents(s *protocol.StateSnapshot) string {
-	var parts []string
-	for _, p := range s.Players {
-		if p.IsSelf {
+// truncateName shortens a name to maxLen visible characters, appending "…".
+func truncateName(name string, maxLen int) string {
+	runes := []rune(name)
+	if len(runes) <= maxLen {
+		return name
+	}
+	return string(runes[:maxLen-1]) + "…"
+}
+
+// renderOpponentBadge renders a multi-line bordered badge for one opponent.
+// Height is always 3 content lines (name/turn, cards, score+conn) so that
+// lipgloss.JoinHorizontal aligns all badges in a row at the same baseline.
+func renderOpponentBadge(p protocol.PlayerView) string {
+	name := truncateName(p.Name, 12)
+
+	var nameLine string
+	if p.IsActive {
+		nameLine = styleBadgeNameActive.Render("▶ "+name) + styleActive.Render(" ◀")
+	} else {
+		nameLine = styleBadgeName.Render("  " + name)
+	}
+
+	cardsLine := fmt.Sprintf("  ♦ %d cartas", p.CardCount)
+
+	var connStr string
+	if !p.Connected {
+		connStr = styleBadgeDisconnStr.Render(" desconectado")
+	}
+	scoreLine := fmt.Sprintf("  %d pts%s", p.TotalScore, connStr)
+
+	content := strings.Join([]string{nameLine, cardsLine, scoreLine}, "\n")
+
+	if p.IsActive {
+		return styleBadgeActive.Render(content)
+	}
+	if !p.Connected {
+		return styleBadgeDisconn.Render(styleDim.Render(content))
+	}
+	return styleBadgeNormal.Render(content)
+}
+
+// renderOpponentChip renders a compact single-line chip for very narrow terminals.
+func renderOpponentChip(p protocol.PlayerView) string {
+	name := truncateName(p.Name, 10)
+	turnMark := ""
+	if p.IsActive {
+		turnMark = styleActive.Render("▶")
+	}
+	connMark := ""
+	if !p.Connected {
+		connMark = styleBadgeDisconnStr.Render("✗")
+	}
+	chip := fmt.Sprintf("%s%s ♦%d ▸%dpts%s", turnMark, name, p.CardCount, p.TotalScore, connMark)
+	return chip
+}
+
+// wrapBadges lays out a slice of pre-rendered badge strings into rows using
+// lipgloss.JoinHorizontal, wrapping whole badges when the next one would exceed
+// termWidth. The gap between badges in a row is badgeGap spaces.
+// This mirrors the same wrapping pattern used by renderMelds.
+func wrapBadges(badges []string, termWidth, badgeGap int) string {
+	if len(badges) == 0 {
+		return ""
+	}
+	gap := strings.Repeat(" ", badgeGap)
+	var rows []string
+	for _, badge := range badges {
+		if len(rows) == 0 {
+			rows = append(rows, badge)
 			continue
 		}
-		turn := ""
-		if p.IsActive {
-			turn = styleActive.Render(" ◄")
+		lastRow := rows[len(rows)-1]
+		candidate := lipgloss.JoinHorizontal(lipgloss.Top, lastRow, gap, badge)
+		if lipgloss.Width(candidate) <= termWidth {
+			rows[len(rows)-1] = candidate
+		} else {
+			rows = append(rows, badge)
 		}
-		line := fmt.Sprintf("%s%s  (%d cartas)  puntaje:%d",
-			p.Name, turn, p.CardCount, p.TotalScore)
-		if !p.Connected {
-			line += styleDim.Render(" [desc]")
-		}
-		parts = append(parts, line)
 	}
-	if len(parts) == 0 {
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
+}
+
+// compactChipWidth is the minimum terminal width below which we switch to chips.
+const compactChipWidth = 60
+
+func (m Model) renderOpponents(s *protocol.StateSnapshot) string {
+	var opponents []protocol.PlayerView
+	for _, p := range s.Players {
+		if !p.IsSelf {
+			opponents = append(opponents, p)
+		}
+	}
+	if len(opponents) == 0 {
 		return styleDim.Render("Sin oponentes") + "\n"
 	}
-	return strings.Join(parts, "   ") + "\n"
+
+	termWidth := m.width
+	if termWidth <= 0 {
+		termWidth = 120
+	}
+
+	if termWidth < compactChipWidth {
+		// Compact chip mode: single-line chips separated by " · ", wrapped as whole units.
+		var chips []string
+		for _, p := range opponents {
+			chips = append(chips, renderOpponentChip(p))
+		}
+		sep := styleBadgeChipSep.Render(" · ")
+		// Wrap chips into rows keeping them as whole units.
+		var chipRows []string
+		currentRow := ""
+		for i, chip := range chips {
+			if i == 0 {
+				currentRow = chip
+				continue
+			}
+			candidate := currentRow + sep + chip
+			if lipgloss.Width(candidate) <= termWidth {
+				currentRow = candidate
+			} else {
+				chipRows = append(chipRows, currentRow)
+				currentRow = chip
+			}
+		}
+		chipRows = append(chipRows, currentRow)
+		return strings.Join(chipRows, "\n") + "\n"
+	}
+
+	// Full badge mode.
+	badges := make([]string, len(opponents))
+	for i, p := range opponents {
+		badges[i] = renderOpponentBadge(p)
+	}
+	return wrapBadges(badges, termWidth, 1) + "\n"
 }
 
 func (m Model) renderMelds(s *protocol.StateSnapshot) string {

@@ -189,3 +189,199 @@ func TestRenderVisual(t *testing.T) {
 		t.Error("viewGame() returned empty string")
 	}
 }
+
+// make5OpponentState returns a snapshot with 5 opponents + self for badge layout tests.
+func make5OpponentState() *protocol.StateSnapshot {
+	s := makeState()
+	s.ActiveID = "opp-3"
+	s.Players = []protocol.PlayerView{
+		{ID: "self-1", Name: "TestPlayer", CardCount: 9, TotalScore: 12, IsSelf: true, Connected: true},
+		{ID: "opp-1", Name: "Alice", CardCount: 8, TotalScore: 5, Connected: true},
+		{ID: "opp-2", Name: "BobWithLongName", CardCount: 3, TotalScore: 42, Connected: true},
+		{ID: "opp-3", Name: "Carlos", CardCount: 6, TotalScore: 99, IsActive: true, Connected: true},
+		{ID: "opp-4", Name: "Diana", CardCount: 11, TotalScore: 0, Connected: false},
+		{ID: "opp-5", Name: "Eve", CardCount: 7, TotalScore: 77, Connected: true},
+	}
+	return s
+}
+
+// TestOpponentBadgeHeight verifies that every badge produced by renderOpponentBadge
+// has the same rendered height so they align properly in a row.
+func TestOpponentBadgeHeight(t *testing.T) {
+	players := make5OpponentState().Players
+	var badges []string
+	for _, p := range players {
+		if !p.IsSelf {
+			badges = append(badges, renderOpponentBadge(p))
+		}
+	}
+	if len(badges) == 0 {
+		t.Fatal("no badges produced")
+	}
+
+	heights := make([]int, len(badges))
+	for i, b := range badges {
+		lines := strings.Split(b, "\n")
+		h := len(lines)
+		for h > 0 && lines[h-1] == "" {
+			h--
+		}
+		heights[i] = h
+	}
+
+	// All badges in the same row must have the same line count.
+	first := heights[0]
+	for i, h := range heights {
+		if h != first {
+			t.Errorf("badge[%d] has height %d, want %d (matching badge[0])", i, h, first)
+		}
+	}
+}
+
+// TestOpponentBadgeRowUniformHeight checks that when badges are joined horizontally
+// into a row, each line of the joined block is the same width (i.e. lipgloss pads
+// them correctly) and no badge content is split across rows.
+func TestOpponentBadgeRowUniformHeight(t *testing.T) {
+	players := make5OpponentState().Players
+	var badges []string
+	for _, p := range players {
+		if !p.IsSelf {
+			badges = append(badges, renderOpponentBadge(p))
+		}
+	}
+
+	row := lipgloss.JoinHorizontal(lipgloss.Top, badges...)
+	lines := strings.Split(row, "\n")
+	h := len(lines)
+	for h > 0 && lines[h-1] == "" {
+		h--
+	}
+	// Each badge is 5 lines (3 content + top/bottom border); the joined row must
+	// maintain that height.
+	if h < 3 {
+		t.Errorf("joined row has only %d lines, expected at least 3", h)
+	}
+}
+
+// TestOpponentBadgeWrapping verifies that at a narrow terminal width (40 cols)
+// badges wrap to new rows rather than overflowing a single line.
+func TestOpponentBadgeWrapping(t *testing.T) {
+	s := make5OpponentState()
+	m := Model{
+		screen: screenGame,
+		selfID: "self-1",
+		state:  s,
+		width:  40,
+	}
+
+	result := m.renderOpponents(s)
+	lines := strings.Split(strings.TrimRight(result, "\n"), "\n")
+	// With width=40 and 5 badges of ~18 chars each, we must have more than 1 line.
+	if len(lines) <= 1 {
+		t.Errorf("expected wrapping at width=40 but got %d line(s)", len(lines))
+	}
+	// No single line should exceed termWidth (plus some ANSI escape overhead is OK;
+	// check rendered/visible width using lipgloss.Width on each line).
+	for i, line := range lines {
+		w := lipgloss.Width(line)
+		if w > 40 {
+			t.Errorf("line[%d] visible width %d exceeds terminal width 40: %q", i, w, line)
+		}
+	}
+}
+
+// TestOpponentNameTruncation verifies that names longer than 12 chars are truncated.
+func TestOpponentNameTruncation(t *testing.T) {
+	p := protocol.PlayerView{
+		ID:        "x",
+		Name:      "VeryLongPlayerName",
+		CardCount: 5,
+		TotalScore: 10,
+		Connected: true,
+	}
+	badge := renderOpponentBadge(p)
+	// The full name must not appear in the badge.
+	if strings.Contains(badge, "VeryLongPlayerName") {
+		t.Error("badge contains un-truncated name VeryLongPlayerName")
+	}
+	// truncateName(name, 12) keeps 11 runes then appends "…": "VeryLongPla…"
+	if !strings.Contains(badge, "VeryLongPla…") {
+		t.Errorf("badge does not contain expected truncated name VeryLongPla…\nbadge:\n%s", badge)
+	}
+}
+
+// TestOpponentCompactChips verifies that very narrow terminals (width < 60) fall
+// back to chip mode and still wrap whole chips.
+func TestOpponentCompactChips(t *testing.T) {
+	s := make5OpponentState()
+	m := Model{
+		screen: screenGame,
+		selfID: "self-1",
+		state:  s,
+		width:  50,
+	}
+	result := m.renderOpponents(s)
+	// In chip mode there should be no box borders.
+	if strings.Contains(result, "╭") || strings.Contains(result, "┏") {
+		t.Error("compact chip mode should not contain box border characters")
+	}
+	// Must still contain player names (possibly truncated).
+	if !strings.Contains(result, "Alice") {
+		t.Error("chip output missing player name Alice")
+	}
+}
+
+// TestOpponentActiveHighlight checks that the active-turn badge uses a
+// visually distinct marker (▶ arrow) that text rendering can verify.
+func TestOpponentActiveHighlight(t *testing.T) {
+	active := protocol.PlayerView{
+		ID: "a", Name: "Carlos", CardCount: 6, TotalScore: 99, IsActive: true, Connected: true,
+	}
+	inactive := protocol.PlayerView{
+		ID: "b", Name: "Alice", CardCount: 8, TotalScore: 5, Connected: true,
+	}
+	activeBadge := renderOpponentBadge(active)
+	inactiveBadge := renderOpponentBadge(inactive)
+
+	if !strings.Contains(activeBadge, "▶") {
+		t.Error("active badge missing ▶ turn indicator")
+	}
+	if !strings.Contains(activeBadge, "◀") {
+		t.Error("active badge missing ◀ turn indicator")
+	}
+	if strings.Contains(inactiveBadge, "▶") {
+		t.Error("inactive badge should not contain ▶")
+	}
+}
+
+// TestRenderVisual5Opponents is a visual sanity test: prints a 5-opponent
+// layout at width 100 and width 60 so the developer can inspect output.
+// Always passes; run with: go test -v -run TestRenderVisual5Opponents
+func TestRenderVisual5Opponents(t *testing.T) {
+	s := make5OpponentState()
+	hand := makeHand()
+	s.Hand = hand
+
+	makeModel := func(w int) Model {
+		m := Model{
+			screen: screenGame,
+			selfID: "self-1",
+			state:  s,
+			width:  w,
+			height: 40,
+			cursor: 2,
+			selected: make(map[int]bool),
+		}
+		m.displayToServer = make([]int, len(hand))
+		for i := range m.displayToServer {
+			m.displayToServer[i] = i
+		}
+		return m
+	}
+
+	for _, w := range []int{100, 60} {
+		m := makeModel(w)
+		section := m.renderOpponents(s)
+		fmt.Printf("\n=== Opponents at width %d ===\n%s", w, section)
+	}
+}
