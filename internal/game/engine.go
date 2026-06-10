@@ -56,17 +56,25 @@ type Player struct {
 	// It must be used in a meld or lay-off before the player may discard.
 	// Nil when the player drew from stock.
 	PickedUpDiscard *Card
+
+	// FirstTablePlayTurn records the turn number (Game.TurnNumber) on which this
+	// player first put cards on the table (meld or lay-off) in the current round.
+	// -1 means no table play has occurred yet this round.
+	// Used to detect "cerrar de mano": the closer earns −10 when this value equals
+	// Game.TurnNumber at round close (i.e. all table plays happened in the final turn).
+	FirstTablePlayTurn int
 }
 
 // PlayerRoundResult holds the reveal data for one player at round end.
 // It is captured before hands are cleared so the snapshot can show everyone's
 // remaining cards in the round-summary and game-over screens.
 type PlayerRoundResult struct {
-	PlayerID   string
-	PlayerName string
-	Hand       Hand // cards still held at round end (empty for the round winner)
-	RoundScore int  // penalty for this round (0 for the round winner)
-	TotalScore int  // cumulative total after this round
+	PlayerID          string
+	PlayerName        string
+	Hand              Hand // cards still held at round end (empty for the round winner)
+	RoundScore        int  // penalty for this round (0 for the round winner, -10 for "de mano")
+	TotalScore        int  // cumulative total after this round (may be negative)
+	WentOutInOnePlay  bool // true when the closer earned the "cerrar de mano" −10 bonus
 }
 
 // RoundResult is captured once per round at the moment endRound fires.
@@ -101,6 +109,12 @@ type Game struct {
 	Phase           Phase
 	ActiveIndex     int // index into Players of whose turn it is
 	Round           int
+	// TurnNumber is a monotonically increasing counter incremented each time a
+	// player finishes their turn (i.e. each advanceTurn call). It is reset to 0
+	// at the start of each round and is used to detect "cerrar de mano": if the
+	// round closer's FirstTablePlayTurn equals TurnNumber at round close, all
+	// their table plays happened within their final turn.
+	TurnNumber      int
 	Events          []string // per-round event log; cleared at startRound
 	// FullEventLog is the lifetime event log across all rounds, capped at
 	// maxEventLog. The server uses this to send a backlog to reconnecting clients
@@ -158,9 +172,11 @@ func (g *Game) startRound() {
 		p.HasMelded = false
 		p.RoundScore = 0
 		p.PickedUpDiscard = nil
+		p.FirstTablePlayTurn = -1 // -1 = no table play yet this round
 	}
 	g.Melds = nil
 	g.Events = nil
+	g.TurnNumber = 0
 	// NOTE: g.FullEventLog and g.ScoreHistory are NOT cleared here — they
 	// accumulate across rounds so clients can view the full game history.
 
@@ -311,6 +327,10 @@ func (g *Game) Meld(playerID string, cardIndexes []int, meldType MeldType) error
 	meld := Meld{Type: meldType, Cards: cards, OwnerID: playerID}
 	g.Melds = append(g.Melds, meld)
 	player.HasMelded = true
+	// Record first table play for "cerrar de mano" detection.
+	if player.FirstTablePlayTurn < 0 {
+		player.FirstTablePlayTurn = g.TurnNumber
+	}
 	// If the picked-up discard was included in this meld, it has been played.
 	if player.PickedUpDiscard != nil {
 		for _, mc := range cards {
@@ -372,6 +392,10 @@ func (g *Game) LayOff(playerID string, cardIndexes []int, meldIndex int) error {
 	// If the picked-up discard was laid off, it has been played.
 	if player.PickedUpDiscard != nil && card.Equal(*player.PickedUpDiscard) {
 		player.PickedUpDiscard = nil
+	}
+	// Record first table play for "cerrar de mano" detection.
+	if player.FirstTablePlayTurn < 0 {
+		player.FirstTablePlayTurn = g.TurnNumber
 	}
 	g.addEvent(fmt.Sprintf("%s agregó %s a la combinación #%d.", player.Name, card.String(), meldIndex+1))
 
@@ -530,21 +554,51 @@ func (g *Game) extractCards(player *Player, indexes []int) ([]Card, error) {
 func (g *Game) advanceTurn() {
 	// Clear the picked-up discard tracker for the player who just finished.
 	g.activePlayer().PickedUpDiscard = nil
+	g.TurnNumber++
 	next := (g.ActiveIndex + 1) % len(g.Players)
 	g.ActiveIndex = next
 	g.Phase = PhaseDrawing
 	g.addEvent(fmt.Sprintf("Es el turno de %s.", g.activePlayer().Name))
 }
 
+// DeManoBonus is the score adjustment applied to a player who closes "de mano"
+// (goes out in a single play: all table plays happened within the final turn).
+// Negative totals are permitted.
+const DeManoBonus = -10
+
 func (g *Game) endRound(winner *Player) error {
 	winner.PickedUpDiscard = nil
-	g.Phase = PhaseRoundEnd
-	g.addEvent(fmt.Sprintf("¡%s se fue! Ronda %d terminada.", winner.Name, g.Round))
 
-	// Score remaining hands.
+	// Detect "cerrar de mano": the winner earns −10 when their first table play
+	// occurred in the same turn they closed (i.e. FirstTablePlayTurn == TurnNumber),
+	// meaning they had made no meld or lay-off in any earlier turn this round.
+	// A winner who never played to the table at all (e.g. closed via discard with
+	// an empty hand from the start) also qualifies: FirstTablePlayTurn stays -1,
+	// but their hand must already be empty — handled by the outer close logic.
+	// For safety we only apply the bonus when hand is empty at close time.
+	wentOutInOnePlay := winner.FirstTablePlayTurn >= 0 &&
+		winner.FirstTablePlayTurn == g.TurnNumber
+
+	g.Phase = PhaseRoundEnd
+
+	if wentOutInOnePlay {
+		g.addEvent(fmt.Sprintf("¡%s cerró de mano! −10 puntos.", winner.Name))
+	} else {
+		g.addEvent(fmt.Sprintf("¡%s se fue! Ronda %d terminada.", winner.Name, g.Round))
+	}
+
+	// Score remaining hands. The winner always has an empty hand (score = 0).
 	for _, p := range g.Players {
 		p.RoundScore = p.Hand.Score()
 		p.TotalScore += p.RoundScore
+	}
+
+	// Apply "cerrar de mano" bonus: subtract 10 from winner's cumulative total.
+	// The round score for the winner is set to -10 so the score-table column sums
+	// remain consistent with the cumulative totals.
+	if wentOutInOnePlay {
+		winner.RoundScore = DeManoBonus
+		winner.TotalScore += DeManoBonus
 	}
 
 	// Capture the round reveal AFTER scoring so RoundScore/TotalScore are final,
@@ -559,11 +613,12 @@ func (g *Game) endRound(winner *Player) error {
 		handCopy := make(Hand, len(p.Hand))
 		copy(handCopy, p.Hand)
 		rr.Results = append(rr.Results, PlayerRoundResult{
-			PlayerID:   p.ID,
-			PlayerName: p.Name,
-			Hand:       handCopy,
-			RoundScore: p.RoundScore,
-			TotalScore: p.TotalScore,
+			PlayerID:         p.ID,
+			PlayerName:       p.Name,
+			Hand:             handCopy,
+			RoundScore:       p.RoundScore,
+			TotalScore:       p.TotalScore,
+			WentOutInOnePlay: p.ID == winner.ID && wentOutInOnePlay,
 		})
 		rs.Scores[p.ID] = p.RoundScore
 		rs.Names[p.ID] = p.Name

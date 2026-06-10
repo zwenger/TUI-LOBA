@@ -888,11 +888,12 @@ func buildSnapshot(g *game.Game, selfID string) protocol.StateSnapshot {
 		}
 		for _, pr := range rr.Results {
 			rph := protocol.RevealedPlayerHand{
-				PlayerID:   pr.PlayerID,
-				PlayerName: pr.PlayerName,
-				RoundScore: pr.RoundScore,
-				TotalScore: pr.TotalScore,
-				IsWinner:   pr.PlayerID == winnerID,
+				PlayerID:         pr.PlayerID,
+				PlayerName:       pr.PlayerName,
+				RoundScore:       pr.RoundScore,
+				TotalScore:       pr.TotalScore,
+				IsWinner:         pr.PlayerID == winnerID,
+				WentOutInOnePlay: pr.WentOutInOnePlay,
 			}
 			for _, c := range pr.Hand {
 				rph.Cards = append(rph.Cards, cardView(c, false))

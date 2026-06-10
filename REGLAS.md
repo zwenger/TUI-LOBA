@@ -111,6 +111,25 @@ Los jugadores con cartas en la mano al cierre reciben puntos de penalización:
 
 El jugador que cierra recibe **0 puntos** en esa ronda.
 
+### Cerrar de mano (menos diez)
+
+**Regla oficial (Pagat.com, Loba de Menos):** "If you win a round by putting down all of your cards at the same time (forming your own piernas or escaleras or adding to those of other players), without having previously put down any cards in that round, your cumulative score is reduced by 10 points."
+
+**Interpretación en esta implementación:** el turno de Loba permite bajar varias combinaciones y agregar cartas antes de descartar, por lo que "al mismo tiempo" se interpreta de la siguiente manera: el jugador que cierra gana el bono de −10 si y solo si **todas sus jugadas en la mesa** (bajadas y agregados) ocurrieron dentro de su **turno final** — es decir, no había bajado ni agregado ninguna carta en ningún turno anterior de la misma ronda.
+
+**Seguimiento:** se registra internamente el número de turno del primer movimiento en la mesa de cada jugador. Al cerrar, si ese número coincide con el turno actual, el bono aplica.
+
+**Efecto en el puntaje:**
+
+- El puntaje acumulado del jugador que cierra se reduce en 10 puntos.
+- El puntaje de la ronda de ese jugador se registra como **−10** (en lugar de 0) para que la suma por columna de la tabla de puntajes coincida con los totales acumulados.
+- Los **totales negativos están permitidos**: un jugador puede quedar con un puntaje total menor a cero sin que eso afecte la lógica del juego (el límite de 101 se controla solo con los valores acumulados > 101).
+- El evento de cierre muestra: *"¡[nombre] cerró de mano! −10 puntos."*
+- En el resumen de ronda, el bloque del ganador indica: *"ganó la mano — ¡de mano! −10 pts"*.
+- La tabla de puntajes muestra −10 en la celda correspondiente a esa ronda.
+
+**Fuente:** [Pagat.com — Rules of Card Games: Loba](https://www.pagat.com/rummy/loba.html)
+
 > **Nota de variantes**: otras fuentes asignan 10 puntos al As. **Esta implementación** usa 15 puntos para el As y 25 para el comodín, acorde al sistema más extendido en Argentina.
 
 ---
@@ -143,6 +162,7 @@ El jugador que cierra recibe **0 puntos** en esa ronda.
 | Puntuación del As | 15 puntos |
 | Puntuación del comodín | 25 puntos |
 | Límite de puntos | 101 (superarlo termina el juego) |
+| Cerrar de mano | −10 pts al total acumulado; totales negativos permitidos |
 | Reenganches | No soportados |
 
 ---

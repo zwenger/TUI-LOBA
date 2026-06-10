@@ -1119,3 +1119,334 @@ func TestRoundResultJokerPenalty(t *testing.T) {
 		}
 	}
 }
+
+// ─── "Cerrar de mano" (menos diez) tests ─────────────────────────────────────
+
+// makeGameInMelding builds a 2-player game already in PhaseMelding with fully
+// controlled hands. turnNumber sets Game.TurnNumber so tests can simulate
+// arbitrary turn history without playing through it.
+func makeGameInMelding(aliceHand, bobHand Hand, turnNumber int) *Game {
+	players := []struct{ ID, Name string }{{"p1", "Alice"}, {"p2", "Bob"}}
+	g, _ := NewGame(players, 0)
+	g.Players[0].Hand = aliceHand
+	g.Players[1].Hand = bobHand
+	g.Phase = PhaseMelding
+	g.ActiveIndex = 0
+	g.TurnNumber = turnNumber
+	return g
+}
+
+// TestDeManoCloserEarnsMinusTen verifies that a closer who melds and closes in
+// their very first table play of the round gets −10.
+// Scenario: Alice melds a pierna (3 cards) and immediately has an empty hand.
+func TestDeManoCloserEarnsMinusTen(t *testing.T) {
+	// Alice has exactly 3 cards forming a valid pierna, Bob has penalty cards.
+	g := makeGameInMelding(
+		Hand{c(Seven, Spades), c(Seven, Hearts), c(Seven, Diamonds)},
+		Hand{c(King, Spades), c(Five, Clubs)},
+		0,
+	)
+	// Alice's FirstTablePlayTurn must be -1 (no previous table play this round).
+	if g.Players[0].FirstTablePlayTurn != -1 {
+		t.Fatalf("FirstTablePlayTurn = %d, want -1 before any play", g.Players[0].FirstTablePlayTurn)
+	}
+
+	// Alice melds the pierna — this empties her hand and closes the round.
+	if err := g.Meld("p1", []int{0, 1, 2}, MeldPierna); err != nil {
+		t.Fatalf("Meld: %v", err)
+	}
+
+	if g.Phase != PhaseRoundEnd && g.Phase != PhaseGameOver {
+		t.Fatalf("expected round end, got %s", g.Phase)
+	}
+	// Alice should have RoundScore = -10.
+	if g.Players[0].RoundScore != DeManoBonus {
+		t.Errorf("Alice RoundScore = %d, want %d", g.Players[0].RoundScore, DeManoBonus)
+	}
+	// Alice's cumulative total = 0 + DeManoBonus = -10.
+	if g.Players[0].TotalScore != DeManoBonus {
+		t.Errorf("Alice TotalScore = %d, want %d", g.Players[0].TotalScore, DeManoBonus)
+	}
+	// RoundResult must reflect WentOutInOnePlay.
+	rr := g.LastRoundResult
+	if rr == nil {
+		t.Fatal("no LastRoundResult")
+	}
+	var aliceResult *PlayerRoundResult
+	for i := range rr.Results {
+		if rr.Results[i].PlayerID == "p1" {
+			aliceResult = &rr.Results[i]
+		}
+	}
+	if aliceResult == nil {
+		t.Fatal("Alice's result not found in LastRoundResult")
+	}
+	if !aliceResult.WentOutInOnePlay {
+		t.Error("WentOutInOnePlay should be true for Alice")
+	}
+	if aliceResult.RoundScore != DeManoBonus {
+		t.Errorf("RoundResult RoundScore = %d, want %d", aliceResult.RoundScore, DeManoBonus)
+	}
+	// ScoreHistory must record -10 for Alice.
+	if len(g.ScoreHistory) == 0 {
+		t.Fatal("ScoreHistory empty after round end")
+	}
+	rs := g.ScoreHistory[len(g.ScoreHistory)-1]
+	if rs.Scores["p1"] != DeManoBonus {
+		t.Errorf("ScoreHistory Alice = %d, want %d", rs.Scores["p1"], DeManoBonus)
+	}
+	// Event log must mention "cerró de mano".
+	found := false
+	for _, ev := range g.Events {
+		if contains(ev, "cerró de mano") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no 'cerró de mano' event found; events: %v", g.Events)
+	}
+}
+
+// TestDeManoNoBonus_PreviousMeld verifies that a closer who melded in an earlier
+// turn does NOT receive the −10 bonus.
+func TestDeManoNoBonus_PreviousMeld(t *testing.T) {
+	// Simulate: Alice already melded in turn 0 (previous turn), now it's turn 1.
+	g := makeGameInMelding(
+		Hand{c(Seven, Spades), c(Seven, Hearts), c(Seven, Diamonds)},
+		Hand{c(King, Spades), c(Five, Clubs)},
+		1, // current turn number
+	)
+	// Pretend Alice melded in turn 0 (a previous turn).
+	g.Players[0].FirstTablePlayTurn = 0
+	g.Players[0].HasMelded = true
+
+	// Alice melds a pierna and empties her hand.
+	if err := g.Meld("p1", []int{0, 1, 2}, MeldPierna); err != nil {
+		t.Fatalf("Meld: %v", err)
+	}
+	if g.Phase != PhaseRoundEnd && g.Phase != PhaseGameOver {
+		t.Fatalf("expected round end, got %s", g.Phase)
+	}
+	// No de-mano bonus: Alice's round score must be 0.
+	if g.Players[0].RoundScore != 0 {
+		t.Errorf("Alice RoundScore = %d, want 0 (no de-mano bonus)", g.Players[0].RoundScore)
+	}
+	rr := g.LastRoundResult
+	if rr == nil {
+		t.Fatal("no LastRoundResult")
+	}
+	for _, pr := range rr.Results {
+		if pr.PlayerID == "p1" && pr.WentOutInOnePlay {
+			t.Error("WentOutInOnePlay should be false when meld was in an earlier turn")
+		}
+	}
+}
+
+// TestDeManoSameFinalTurn_MultipleActions verifies that a closer who performs
+// MULTIPLE meld/lay-off actions within their final turn still earns −10
+// (all table plays happened in the same turn they closed).
+func TestDeManoSameFinalTurn_MultipleActions(t *testing.T) {
+	// Alice has 6 cards: a pierna + an escalera — all in one turn.
+	g := makeGameInMelding(
+		Hand{
+			c(Seven, Spades), c(Seven, Hearts), c(Seven, Diamonds), // pierna
+			c(Two, Clubs), c(Three, Clubs), c(Four, Clubs),         // escalera
+		},
+		Hand{c(King, Spades), c(Five, Clubs)},
+		0,
+	)
+
+	// Meld the pierna first.
+	if err := g.Meld("p1", []int{0, 1, 2}, MeldPierna); err != nil {
+		t.Fatalf("Meld pierna: %v", err)
+	}
+	// Round should NOT have ended yet (3 cards still in hand).
+	if g.Phase == PhaseRoundEnd || g.Phase == PhaseGameOver {
+		t.Fatal("round ended too early after first meld")
+	}
+	// Meld the escalera — empties hand, closes round.
+	if err := g.Meld("p1", []int{0, 1, 2}, MeldEscalera); err != nil {
+		t.Fatalf("Meld escalera: %v", err)
+	}
+	if g.Phase != PhaseRoundEnd && g.Phase != PhaseGameOver {
+		t.Fatalf("expected round end, got %s", g.Phase)
+	}
+	if g.Players[0].RoundScore != DeManoBonus {
+		t.Errorf("Alice RoundScore = %d, want %d (multi-action same turn)", g.Players[0].RoundScore, DeManoBonus)
+	}
+}
+
+// TestDeManoCloseViaDiscard verifies that closing via a final discard (emptying
+// the hand by discarding, not melding) also earns −10 when all prior melds were
+// in the same final turn.
+func TestDeManoCloseViaDiscard(t *testing.T) {
+	// Alice melds 3 cards (pierna) and is left with 1 card she discards.
+	g := makeGameInMelding(
+		Hand{
+			c(Seven, Spades), c(Seven, Hearts), c(Seven, Diamonds), // pierna
+			c(Two, Clubs), // will be discarded
+		},
+		Hand{c(King, Spades), c(Five, Clubs)},
+		0,
+	)
+
+	// Meld the pierna.
+	if err := g.Meld("p1", []int{0, 1, 2}, MeldPierna); err != nil {
+		t.Fatalf("Meld: %v", err)
+	}
+	// Discard the last card — should close the round.
+	if err := g.Discard("p1", 0); err != nil {
+		t.Fatalf("Discard: %v", err)
+	}
+	if g.Phase != PhaseRoundEnd && g.Phase != PhaseGameOver {
+		t.Fatalf("expected round end, got %s", g.Phase)
+	}
+	if g.Players[0].RoundScore != DeManoBonus {
+		t.Errorf("Alice RoundScore = %d, want %d (close via discard)", g.Players[0].RoundScore, DeManoBonus)
+	}
+}
+
+// TestDeManoMultiRoundAccumulation verifies that the −10 bonus interacts
+// correctly with multi-round ScoreHistory totals.
+func TestDeManoMultiRoundAccumulation(t *testing.T) {
+	players := []struct{ ID, Name string }{{"p1", "Alice"}, {"p2", "Bob"}}
+	g, err := NewGame(players, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Round 1: Alice closes normally (no de-mano), Bob gets 10 penalty.
+	g.Players[0].Hand = Hand{c(Two, Spades)}
+	g.Players[1].Hand = Hand{c(King, Hearts)}
+	g.Phase = PhaseMelding
+	g.ActiveIndex = 0
+	// Simulate that Alice had a previous meld (FirstTablePlayTurn < TurnNumber).
+	g.Players[0].FirstTablePlayTurn = 0
+	g.TurnNumber = 1
+	if err := g.Discard("p1", 0); err != nil {
+		t.Fatalf("round 1 discard: %v", err)
+	}
+	// Alice total after round 1 = 0.
+	if g.Players[0].TotalScore != 0 {
+		t.Errorf("round 1 Alice total = %d, want 0", g.Players[0].TotalScore)
+	}
+	// ScoreHistory round 1: Alice = 0.
+	if g.ScoreHistory[0].Scores["p1"] != 0 {
+		t.Errorf("round 1 ScoreHistory Alice = %d, want 0", g.ScoreHistory[0].Scores["p1"])
+	}
+
+	if g.Phase != PhaseRoundEnd {
+		t.Skip("game over after round 1")
+	}
+	if err := g.NextRound(); err != nil {
+		t.Fatalf("NextRound: %v", err)
+	}
+
+	// Round 2: Alice closes de mano.
+	g.Players[0].Hand = Hand{c(Seven, Spades), c(Seven, Hearts), c(Seven, Diamonds)}
+	g.Players[1].Hand = Hand{c(King, Hearts), c(Five, Clubs)} // Bob gets 15
+	g.Phase = PhaseMelding
+	g.ActiveIndex = 0
+	// Alice has not played to the table yet this round (FirstTablePlayTurn = -1).
+	// startRound already reset it; verify.
+	if g.Players[0].FirstTablePlayTurn != -1 {
+		t.Fatalf("round 2 FirstTablePlayTurn = %d, want -1 (reset by startRound)", g.Players[0].FirstTablePlayTurn)
+	}
+
+	if err := g.Meld("p1", []int{0, 1, 2}, MeldPierna); err != nil {
+		t.Fatalf("round 2 meld: %v", err)
+	}
+	if g.Phase != PhaseRoundEnd && g.Phase != PhaseGameOver {
+		t.Fatalf("expected round end, got %s", g.Phase)
+	}
+
+	// Alice total: 0 (round 1) + (-10) (round 2) = -10.
+	if g.Players[0].TotalScore != -10 {
+		t.Errorf("after round 2 Alice total = %d, want -10", g.Players[0].TotalScore)
+	}
+	// ScoreHistory round 2: Alice = -10.
+	if len(g.ScoreHistory) < 2 {
+		t.Fatal("ScoreHistory should have 2 entries")
+	}
+	if g.ScoreHistory[1].Scores["p1"] != DeManoBonus {
+		t.Errorf("round 2 ScoreHistory Alice = %d, want %d", g.ScoreHistory[1].Scores["p1"], DeManoBonus)
+	}
+}
+
+// TestDeManoNegativeTotalAllowed verifies that a player with an existing score
+// can reach a negative total via the de-mano bonus, which is valid.
+func TestDeManoNegativeTotalAllowed(t *testing.T) {
+	g := makeGameInMelding(
+		Hand{c(Seven, Spades), c(Seven, Hearts), c(Seven, Diamonds)},
+		Hand{c(King, Spades), c(Five, Clubs)},
+		0,
+	)
+	// Give Alice a starting score of 5 (from a previous round).
+	g.Players[0].TotalScore = 5
+
+	if err := g.Meld("p1", []int{0, 1, 2}, MeldPierna); err != nil {
+		t.Fatalf("Meld: %v", err)
+	}
+	// Total = 5 + (-10) = -5.
+	if g.Players[0].TotalScore != -5 {
+		t.Errorf("Alice TotalScore = %d, want -5 (negative allowed)", g.Players[0].TotalScore)
+	}
+}
+
+// TestDeManoGameOverThresholdUnaffected verifies that the 101-point threshold
+// check is unaffected by the de-mano bonus: a player at 95 points who closes
+// de mano ends at 85, which does NOT trigger game over.
+func TestDeManoGameOverThresholdUnaffected(t *testing.T) {
+	g := makeGameInMelding(
+		Hand{c(Seven, Spades), c(Seven, Hearts), c(Seven, Diamonds)},
+		Hand{c(King, Spades), c(Five, Clubs)},
+		0,
+	)
+	// Give Alice 95 cumulative points (Bob near limit too).
+	g.Players[0].TotalScore = 95
+	g.Players[1].TotalScore = 90
+
+	if err := g.Meld("p1", []int{0, 1, 2}, MeldPierna); err != nil {
+		t.Fatalf("Meld: %v", err)
+	}
+	// Alice: 95 + (-10) = 85, Bob: 90 + 15 = 105.
+	// Bob exceeded 101, so game should be over.
+	if g.Phase != PhaseGameOver {
+		t.Fatalf("expected game_over (Bob exceeded 101), got %s", g.Phase)
+	}
+	// Alice's total must be 85 (de-mano applied correctly).
+	if g.Players[0].TotalScore != 85 {
+		t.Errorf("Alice TotalScore = %d, want 85", g.Players[0].TotalScore)
+	}
+}
+
+// TestDeManoLayOff verifies that a closer who only lays off (no own meld) still
+// earns −10 as long as the lay-off happened in the final turn.
+func TestDeManoLayOff(t *testing.T) {
+	g := makeGameInMelding(
+		Hand{c(Seven, Clubs)}, // Alice will lay off one card
+		Hand{c(King, Spades), c(Five, Clubs)},
+		0,
+	)
+	// Pre-put a pierna on the table that Alice can add to.
+	g.Melds = []Meld{{
+		Type:    MeldPierna,
+		Cards:   []Card{c(Seven, Spades), c(Seven, Hearts), c(Seven, Diamonds)},
+		OwnerID: "p2",
+	}}
+	// Alice must have HasMelded = true to be allowed to lay off.
+	g.Players[0].HasMelded = true
+	// But FirstTablePlayTurn is still -1 (set by startRound).
+
+	// Alice lays off 7♣ — this empties her hand and closes.
+	if err := g.LayOff("p1", []int{0}, 0); err != nil {
+		t.Fatalf("LayOff: %v", err)
+	}
+	if g.Phase != PhaseRoundEnd && g.Phase != PhaseGameOver {
+		t.Fatalf("expected round end, got %s", g.Phase)
+	}
+	if g.Players[0].RoundScore != DeManoBonus {
+		t.Errorf("Alice RoundScore = %d, want %d (lay-off close)", g.Players[0].RoundScore, DeManoBonus)
+	}
+}

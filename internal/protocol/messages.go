@@ -93,12 +93,13 @@ type PlayerView struct {
 // round-summary and game-over screens. Cards are only revealed when the round
 // is over; during normal play other players' hands remain hidden (count only).
 type RevealedPlayerHand struct {
-	PlayerID   string     `json:"player_id"`
-	PlayerName string     `json:"player_name"`
-	Cards      []CardView `json:"cards"`       // full card identities (public at round end)
-	RoundScore int        `json:"round_score"` // penalty sum for this round (0 = round winner)
-	TotalScore int        `json:"total_score"` // cumulative total after this round
-	IsWinner   bool       `json:"is_winner"`   // true for the player who went out
+	PlayerID         string     `json:"player_id"`
+	PlayerName       string     `json:"player_name"`
+	Cards            []CardView `json:"cards"`                // full card identities (public at round end)
+	RoundScore       int        `json:"round_score"`          // -10 for "de mano", 0 for normal win, >0 for losers
+	TotalScore       int        `json:"total_score"`          // cumulative total (may be negative)
+	IsWinner         bool       `json:"is_winner"`            // true for the player who went out
+	WentOutInOnePlay bool       `json:"went_out_in_one_play"` // true when the "cerrar de mano" −10 bonus applies
 }
 
 // RoundScoresView carries per-player scores for one completed round.

@@ -511,6 +511,145 @@ func TestScoreBreakdownEmpty(t *testing.T) {
 	}
 }
 
+// TestScoreBreakdownDeMano verifies that an empty hand with total=-10 returns
+// the "de mano" breakdown string.
+func TestScoreBreakdownDeMano(t *testing.T) {
+	result := buildScoreBreakdown(nil, -10)
+	if !strings.Contains(result, "-10") {
+		t.Errorf("de-mano breakdown missing -10: %q", result)
+	}
+	if !strings.Contains(result, "de mano") {
+		t.Errorf("de-mano breakdown missing 'de mano': %q", result)
+	}
+}
+
+// ─── "Cerrar de mano" reveal render tests ────────────────────────────────────
+
+// makeDeManoRoundReveal builds a RoundReveal slice where Alice won "de mano".
+func makeDeManoRoundReveal() []protocol.RevealedPlayerHand {
+	return []protocol.RevealedPlayerHand{
+		{
+			PlayerID:         "p1",
+			PlayerName:       "Alice",
+			Cards:            nil, // empty — won the round
+			RoundScore:       -10,
+			TotalScore:       -10,
+			IsWinner:         true,
+			WentOutInOnePlay: true,
+		},
+		{
+			PlayerID:   "p2",
+			PlayerName: "Bob",
+			Cards: []protocol.CardView{
+				{Rank: 13, Suit: 0, Label: "K♠"},
+				{Rank: 5, Suit: 3, Label: " 5♣"},
+			},
+			RoundScore: 15,
+			TotalScore: 15,
+		},
+	}
+}
+
+// TestRenderRoundSummaryDeManoVisual prints the round summary with a de-mano
+// winner. Always passes; run with: go test -v -run TestRenderRoundSummaryDeManoVisual
+func TestRenderRoundSummaryDeManoVisual(t *testing.T) {
+	snap := &protocol.StateSnapshot{
+		Phase:       "round_end",
+		Round:       2,
+		RoundReveal: makeDeManoRoundReveal(),
+		Players: []protocol.PlayerView{
+			{ID: "p1", Name: "Alice", TotalScore: -10, IsSelf: true, Connected: true},
+			{ID: "p2", Name: "Bob", TotalScore: 15, Connected: true},
+		},
+	}
+
+	m := Model{
+		screen: screenRound,
+		selfID: "p1",
+		state:  snap,
+		width:  100,
+		height: 40,
+	}
+
+	view := m.viewRoundSummary()
+	fmt.Println("\n=== Round Summary — De Mano winner (width 100) ===")
+	fmt.Println(view)
+
+	if strings.TrimSpace(view) == "" {
+		t.Error("viewRoundSummary() returned empty string")
+	}
+	// Must contain the de-mano winner text.
+	if !strings.Contains(view, "de mano") {
+		t.Errorf("round summary missing 'de mano' bonus text\nview:\n%s", view)
+	}
+	// Must contain −10.
+	if !strings.Contains(view, "-10") {
+		t.Errorf("round summary missing '-10' de-mano score\nview:\n%s", view)
+	}
+}
+
+// TestRenderRevealBlockDeMano verifies that the de-mano winner block shows the
+// bonus label and that the score breakdown shows -10.
+func TestRenderRevealBlockDeMano(t *testing.T) {
+	rph := protocol.RevealedPlayerHand{
+		PlayerID:         "p1",
+		PlayerName:       "Alice",
+		Cards:            nil,
+		RoundScore:       -10,
+		TotalScore:       -10,
+		IsWinner:         true,
+		WentOutInOnePlay: true,
+	}
+
+	block := renderRevealBlock(rph, 100)
+
+	if !strings.Contains(block, "de mano") {
+		t.Errorf("de-mano reveal block missing 'de mano' label\nblock:\n%s", block)
+	}
+	if !strings.Contains(block, "-10") {
+		t.Errorf("de-mano reveal block missing '-10'\nblock:\n%s", block)
+	}
+	if !strings.Contains(block, "Alice") {
+		t.Errorf("de-mano reveal block missing player name\nblock:\n%s", block)
+	}
+}
+
+// TestScoreTableNegativeCell verifies that the score table renders a negative
+// number in a cell without panicking and contains the -10 value.
+func TestScoreTableNegativeCell(t *testing.T) {
+	names := map[string]string{"p1": "Alice", "p2": "Bob"}
+	snap := &protocol.StateSnapshot{
+		Phase: "draw",
+		Round: 3,
+		Players: []protocol.PlayerView{
+			{ID: "p1", Name: "Alice", TotalScore: -5, IsSelf: true, Connected: true},
+			{ID: "p2", Name: "Bob", TotalScore: 15, Connected: true},
+		},
+		ScoreHistory: []protocol.RoundScoresView{
+			{Round: 1, Scores: map[string]int{"p1": 5, "p2": 15}, Names: names},
+			{Round: 2, Scores: map[string]int{"p1": -10, "p2": 0}, Names: names},
+		},
+	}
+
+	m := Model{
+		screen:      screenScoreTable,
+		selfID:      "p1",
+		state:       snap,
+		overlayFrom: screenGame,
+		width:       100,
+		height:      40,
+	}
+
+	view := m.viewScoreTable()
+	if strings.TrimSpace(view) == "" {
+		t.Error("viewScoreTable() returned empty string")
+	}
+	// The -10 cell must appear without panic.
+	if !strings.Contains(view, "-10") {
+		t.Errorf("score table missing '-10' de-mano cell\nview:\n%s", view)
+	}
+}
+
 // TestCardPenaltyValues verifies cardPenaltyValue for each rule-relevant rank.
 func TestCardPenaltyValues(t *testing.T) {
 	cases := []struct {

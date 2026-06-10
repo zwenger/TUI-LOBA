@@ -1344,7 +1344,11 @@ func renderRevealBlock(rph protocol.RevealedPlayerHand, termWidth int) string {
 	// Name / winner marker.
 	nameStr := rph.PlayerName
 	if rph.IsWinner {
-		nameStr = styleActive.Render("★ " + nameStr + " — ganó la mano")
+		winnerLabel := "ganó la mano"
+		if rph.WentOutInOnePlay {
+			winnerLabel = "ganó la mano — ¡de mano! −10 pts"
+		}
+		nameStr = styleActive.Render("★ " + nameStr + " — " + winnerLabel)
 	} else {
 		nameStr = styleBadgeName.Render(nameStr)
 	}
@@ -1397,9 +1401,13 @@ func cardPenaltyValue(cv protocol.CardView) int {
 }
 
 // buildScoreBreakdown builds a human-readable score formula, e.g.
-// "K♠+Q♦+5♣ = 10+10+5 = 25" or "+0 pts esta mano" for the round winner.
+// "K♠+Q♦+5♣ = 10+10+5 = 25" or "+0 pts esta mano" for the round winner,
+// or "−10 pts esta mano (de mano)" for the "cerrar de mano" bonus.
 func buildScoreBreakdown(cards []protocol.CardView, total int) string {
 	if len(cards) == 0 {
+		if total < 0 {
+			return fmt.Sprintf("%d pts esta mano (de mano)", total)
+		}
 		return "+0 pts esta mano"
 	}
 	var labels []string
