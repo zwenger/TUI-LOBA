@@ -909,6 +909,178 @@ func TestRoundResultRevealPreservedAfterNextRound(t *testing.T) {
 
 // TestRoundResultJokerPenalty verifies that a joker left in hand is captured
 // in the reveal with penalty value 25.
+// ─── ScoreHistory tests ───────────────────────────────────────────────────────
+
+// TestScoreHistoryAccumulates verifies that ScoreHistory grows by one entry per
+// completed round and that per-player scores match the engine's per-round tallies.
+// The test drives a 2-player game through 3 rounds using seeded, rigged hands.
+func TestScoreHistoryAccumulates(t *testing.T) {
+	players := []struct{ ID, Name string }{
+		{"p1", "Alice"},
+		{"p2", "Bob"},
+	}
+	g, err := NewGame(players, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type roundSetup struct {
+		aliceHand Hand
+		bobHand   Hand
+	}
+
+	// Alice wins each round by holding one cheap card, Bob always holds one
+	// card whose penalty we can predict.
+	rounds := []roundSetup{
+		{Hand{c(Two, Spades)}, Hand{c(King, Hearts)}},        // Bob penalty = 10
+		{Hand{c(Three, Clubs)}, Hand{c(Five, Diamonds)}},     // Bob penalty = 5
+		{Hand{c(Four, Hearts)}, Hand{c(Ace, Spades)}},        // Bob penalty = 15
+	}
+
+	bobAccum := 0
+	for i, setup := range rounds {
+		if g.Phase == PhaseGameOver {
+			break
+		}
+		g.Players[0].Hand = setup.aliceHand
+		g.Players[1].Hand = setup.bobHand
+		g.Phase = PhaseMelding
+		g.ActiveIndex = 0 // Alice's turn
+
+		if err := g.Discard("p1", 0); err != nil {
+			t.Fatalf("round %d Discard: %v", i+1, err)
+		}
+
+		// Verify ScoreHistory grew.
+		if len(g.ScoreHistory) != i+1 {
+			t.Fatalf("round %d: ScoreHistory len = %d, want %d", i+1, len(g.ScoreHistory), i+1)
+		}
+		rs := g.ScoreHistory[i]
+		if rs.Round != i+1 {
+			t.Errorf("round %d: ScoreHistory[%d].Round = %d, want %d", i+1, i, rs.Round, i+1)
+		}
+		if rs.Scores["p1"] != 0 {
+			t.Errorf("round %d: Alice's score = %d, want 0 (round winner)", i+1, rs.Scores["p1"])
+		}
+		// Bob's expected penalty for this round.
+		wantBob := setup.bobHand.Score()
+		if rs.Scores["p2"] != wantBob {
+			t.Errorf("round %d: Bob's score = %d, want %d", i+1, rs.Scores["p2"], wantBob)
+		}
+		bobAccum += wantBob
+		// Names must be captured.
+		if rs.Names["p1"] != "Alice" {
+			t.Errorf("round %d: Names[p1] = %q, want Alice", i+1, rs.Names["p1"])
+		}
+
+		// Advance to next round if not game over.
+		if g.Phase == PhaseRoundEnd {
+			if err := g.NextRound(); err != nil {
+				t.Fatalf("round %d NextRound: %v", i+1, err)
+			}
+		}
+	}
+}
+
+// TestScoreHistoryPreservedAcrossRounds verifies that calling NextRound does NOT
+// clear ScoreHistory — it must survive across the whole game.
+func TestScoreHistoryPreservedAcrossRounds(t *testing.T) {
+	players := []struct{ ID, Name string }{
+		{"p1", "Alice"},
+		{"p2", "Bob"},
+	}
+	g, err := NewGame(players, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Complete round 1.
+	g.Players[0].Hand = Hand{c(Two, Spades)}
+	g.Players[1].Hand = Hand{c(Seven, Hearts)}
+	g.Phase = PhaseMelding
+	g.ActiveIndex = 0
+	if err := g.Discard("p1", 0); err != nil {
+		t.Fatalf("round 1 discard: %v", err)
+	}
+	if len(g.ScoreHistory) != 1 {
+		t.Fatalf("expected 1 entry after round 1, got %d", len(g.ScoreHistory))
+	}
+	round1 := g.ScoreHistory[0]
+
+	if g.Phase != PhaseRoundEnd {
+		t.Skip("game over after round 1, not checking preservation")
+	}
+	if err := g.NextRound(); err != nil {
+		t.Fatalf("NextRound: %v", err)
+	}
+	// History must still contain round 1's entry.
+	if len(g.ScoreHistory) != 1 {
+		t.Fatalf("ScoreHistory should still have 1 entry after NextRound, got %d", len(g.ScoreHistory))
+	}
+	if g.ScoreHistory[0].Round != round1.Round {
+		t.Errorf("ScoreHistory[0] changed after NextRound")
+	}
+}
+
+// TestFullEventLogAccumulates verifies that FullEventLog grows across rounds
+// (not cleared by startRound) and that EventLogTail returns a correctly-bounded
+// subset.
+func TestFullEventLogAccumulates(t *testing.T) {
+	players := []struct{ ID, Name string }{
+		{"p1", "Alice"},
+		{"p2", "Bob"},
+	}
+	g, err := NewGame(players, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Events should be seeded by startRound.
+	if len(g.FullEventLog) == 0 {
+		t.Fatal("FullEventLog should be non-empty after NewGame")
+	}
+	initialLen := len(g.FullEventLog)
+
+	// Add a few events manually.
+	g.addEvent("test-event-A")
+	g.addEvent("test-event-B")
+	if len(g.FullEventLog) != initialLen+2 {
+		t.Fatalf("FullEventLog len = %d, want %d", len(g.FullEventLog), initialLen+2)
+	}
+
+	// Tail(1) returns the last 1 entry.
+	tail1 := g.EventLogTail(1)
+	if len(tail1) != 1 || tail1[0] != "test-event-B" {
+		t.Errorf("EventLogTail(1) = %v, want [test-event-B]", tail1)
+	}
+
+	// Tail(0) returns all.
+	tailAll := g.EventLogTail(0)
+	if len(tailAll) != len(g.FullEventLog) {
+		t.Errorf("EventLogTail(0) len = %d, want %d", len(tailAll), len(g.FullEventLog))
+	}
+
+	// Complete round 1 and start round 2 — FullEventLog must NOT be cleared.
+	g.Players[0].Hand = Hand{c(Two, Spades)}
+	g.Players[1].Hand = Hand{c(Seven, Hearts)}
+	g.Phase = PhaseMelding
+	g.ActiveIndex = 0
+	_ = g.Discard("p1", 0)
+	lenAfterRoundEnd := len(g.FullEventLog)
+	if lenAfterRoundEnd <= initialLen+2 {
+		t.Errorf("FullEventLog should grow at round end; got %d", lenAfterRoundEnd)
+	}
+
+	if g.Phase == PhaseRoundEnd {
+		_ = g.NextRound()
+		// After NextRound (which calls startRound), FullEventLog must still have
+		// everything plus the new round-start event.
+		if len(g.FullEventLog) < lenAfterRoundEnd {
+			t.Errorf("FullEventLog shrunk after NextRound: %d < %d", len(g.FullEventLog), lenAfterRoundEnd)
+		}
+	}
+}
+
 func TestRoundResultJokerPenalty(t *testing.T) {
 	players := []struct{ ID, Name string }{
 		{"p1", "Alice"},

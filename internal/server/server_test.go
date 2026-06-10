@@ -565,3 +565,127 @@ func gamePhaseRoundEnd() game.Phase { return game.PhaseRoundEnd }
 
 // gamePhaseGameOver returns game.PhaseGameOver.
 func gamePhaseGameOver() game.Phase { return game.PhaseGameOver }
+
+// ─── ScoreHistory + EventLogTail snapshot tests ───────────────────────────────
+
+// TestBuildSnapshotScoreHistoryEmpty verifies that ScoreHistory is absent from
+// the snapshot before any round completes.
+func TestBuildSnapshotScoreHistoryEmpty(t *testing.T) {
+	g, selfID := buildTestGame(t)
+	snap := buildSnapshot(g, selfID)
+	if len(snap.ScoreHistory) != 0 {
+		t.Errorf("expected empty ScoreHistory before first round ends, got %d entries", len(snap.ScoreHistory))
+	}
+}
+
+// TestBuildSnapshotScoreHistoryAfterRound verifies that ScoreHistory is
+// populated after a round ends and contains the correct per-player scores.
+func TestBuildSnapshotScoreHistoryAfterRound(t *testing.T) {
+	g, selfID := buildTestGame(t)
+
+	// Rig and end round 1.
+	g.Players[0].Hand = gameHand(gameCard(2, 0))          // Alice: 2♠ (2 pts — but she wins)
+	g.Players[1].Hand = gameHand(gameCard(13, 1), gameCard(5, 3)) // Bob: K♥+5♣ = 15
+	g.Phase = gamePhaseMelding()
+	if err := g.Discard("p1", 0); err != nil {
+		t.Fatalf("discard: %v", err)
+	}
+
+	snap := buildSnapshot(g, selfID)
+	if len(snap.ScoreHistory) != 1 {
+		t.Fatalf("expected 1 ScoreHistory entry, got %d", len(snap.ScoreHistory))
+	}
+	rs := snap.ScoreHistory[0]
+	if rs.Round != 1 {
+		t.Errorf("ScoreHistory[0].Round = %d, want 1", rs.Round)
+	}
+	if rs.Scores["p1"] != 0 {
+		t.Errorf("Alice round score = %d, want 0", rs.Scores["p1"])
+	}
+	if rs.Scores["p2"] != 15 {
+		t.Errorf("Bob round score = %d, want 15", rs.Scores["p2"])
+	}
+	if rs.Names["p1"] != "Alice" {
+		t.Errorf("Names[p1] = %q, want Alice", rs.Names["p1"])
+	}
+}
+
+// TestBuildSnapshotEventLogTailPopulated verifies that EventLogTail is non-empty
+// after game start (since startRound generates events).
+func TestBuildSnapshotEventLogTailPopulated(t *testing.T) {
+	g, selfID := buildTestGame(t)
+	snap := buildSnapshot(g, selfID)
+	if len(snap.EventLogTail) == 0 {
+		t.Error("expected non-empty EventLogTail after game start")
+	}
+}
+
+// TestBuildSnapshotEventLogTailCapped verifies that EventLogTail never exceeds
+// eventLogTailSize entries.
+func TestBuildSnapshotEventLogTailCapped(t *testing.T) {
+	g, selfID := buildTestGame(t)
+	// Add more events than the cap.
+	for i := 0; i < eventLogTailSize+20; i++ {
+		g.AddEvent("spam-event")
+	}
+	snap := buildSnapshot(g, selfID)
+	if len(snap.EventLogTail) > eventLogTailSize {
+		t.Errorf("EventLogTail len = %d, want ≤ %d", len(snap.EventLogTail), eventLogTailSize)
+	}
+}
+
+// TestReconnectGetsEventLogContext is an integration-level test: Alice joins,
+// game starts, Alice disconnects and reconnects. The first snapshot she receives
+// must include a non-empty EventLogTail so she has recent context.
+func TestReconnectGetsEventLogContext(t *testing.T) {
+	_, addr := startServer(t)
+
+	aliceConn, aliceR := dialAndJoin(t, addr, "Alice")
+	drainLobby(t, aliceR)
+
+	bobConn, bobR := dialAndJoin(t, addr, "Bob")
+	_, _ = bobConn, bobR
+	drainLobby(t, aliceR)
+
+	if err := protocol.WriteJSON(aliceConn, protocol.Command{Type: protocol.CmdStart}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	snap := drainUntilState(t, aliceR)
+	aliceID := ""
+	for _, p := range snap.Players {
+		if p.IsSelf {
+			aliceID = p.ID
+		}
+	}
+
+	// Drop Alice.
+	aliceConn.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	// Reconnect via seat picker.
+	aliceConn2, aliceR2, offer := joinStartedGame(t, addr)
+	if len(offer.Seats) == 0 {
+		t.Fatal("expected at least one seat")
+	}
+	foundSeat := false
+	for _, seat := range offer.Seats {
+		if seat.ID == aliceID {
+			foundSeat = true
+			if err := protocol.WriteJSON(aliceConn2, protocol.Command{
+				Type:   protocol.CmdClaimSeat,
+				SeatID: seat.ID,
+			}); err != nil {
+				t.Fatalf("claim seat: %v", err)
+			}
+			break
+		}
+	}
+	if !foundSeat {
+		t.Fatalf("Alice's seat not in offer")
+	}
+
+	snap2 := drainUntilState(t, aliceR2)
+	if len(snap2.EventLogTail) == 0 {
+		t.Error("reconnecting client must receive non-empty EventLogTail")
+	}
+}

@@ -727,12 +727,34 @@ func (pnd *pending) writePump() {
 
 // ─── State snapshot builder ───────────────────────────────────────────────────
 
+// eventLogTailSize is the number of recent lifetime-log entries included in
+// every snapshot. Reconnecting clients use this to quickly recover context.
+// 50 entries is plenty without bloating the wire payload significantly.
+const eventLogTailSize = 50
+
 func buildSnapshot(g *game.Game, selfID string) protocol.StateSnapshot {
 	snap := protocol.StateSnapshot{
-		Phase:      g.Phase.String(),
-		Round:      g.Round,
-		StockCount: len(g.Stock),
-		Events:     g.Events,
+		Phase:        g.Phase.String(),
+		Round:        g.Round,
+		StockCount:   len(g.Stock),
+		Events:       g.Events,
+		EventLogTail: g.EventLogTail(eventLogTailSize),
+	}
+
+	// ScoreHistory: convert engine type to protocol view.
+	for _, rs := range g.ScoreHistory {
+		rv := protocol.RoundScoresView{
+			Round:  rs.Round,
+			Scores: make(map[string]int, len(rs.Scores)),
+			Names:  make(map[string]string, len(rs.Names)),
+		}
+		for id, pts := range rs.Scores {
+			rv.Scores[id] = pts
+		}
+		for id, name := range rs.Names {
+			rv.Names[id] = name
+		}
+		snap.ScoreHistory = append(snap.ScoreHistory, rv)
 	}
 	if g.Phase == game.PhaseGameOver {
 		w := g.Winner()

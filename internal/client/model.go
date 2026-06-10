@@ -80,13 +80,19 @@ func (s sortMode) String() string {
 type screen int
 
 const (
-	screenName  screen = iota // name entry prompt
-	screenLobby               // waiting room
-	screenSeats               // seat picker (reconnect to a started game)
-	screenGame                // main game table
-	screenRound               // round-end summary
-	screenOver                // game-over / winner
+	screenName      screen = iota // name entry prompt
+	screenLobby                   // waiting room
+	screenSeats                   // seat picker (reconnect to a started game)
+	screenGame                    // main game table
+	screenRound                   // round-end summary
+	screenOver                    // game-over / winner
+	screenScoreTable              // full-screen score table (toggled by P)
+	screenEventLog                // full-screen event log   (toggled by L)
 )
+
+// maxClientEventHistory is the cap for the client-side event history.
+// Newest entries are kept when the cap is exceeded.
+const maxClientEventHistory = 200
 
 // ─── Messages ─────────────────────────────────────────────────────────────────
 
@@ -124,7 +130,21 @@ type Model struct {
 	// game state
 	state     *protocol.StateSnapshot
 	lastError string
-	events    []string
+	events    []string // current-round events (last N from server)
+
+	// eventHistory is the client-side lifetime log, capped at maxClientEventHistory.
+	// On each state update we merge the server's EventLogTail (for reconnects) and
+	// the current Events slice; on EvtMessage we append directly.
+	eventHistory []string
+
+	// overlayFrom stores the screen we were on before opening an overlay (score
+	// table or event log) so that Esc / the toggle key can return to it.
+	overlayFrom screen
+
+	// eventLogOffset is the scroll position in the event log view.
+	// 0 = show the newest entries (bottom of the list).
+	// Positive values scroll toward older entries.
+	eventLogOffset int
 
 	// hand cursor / selection
 	cursor   int
@@ -246,14 +266,26 @@ func (m Model) handleEnvelope(env protocol.Envelope) (Model, tea.Cmd) {
 			}
 			m.state = &snap
 			m.events = snap.Events
+
+			// Merge the server's EventLogTail into our local history.
+			// On a fresh connect or reconnect the tail provides recent context
+			// that may predate this session. We deduplicate by checking whether
+			// the tail's last entry already appears at the end of our history.
+			m.mergeEventLogTail(snap.EventLogTail)
+			// Also merge this round's Events in case they're not already there.
+			m.appendEventHistory(snap.Events...)
+
 			m.lastError = ""
-			switch snap.Phase {
-			case "game_over":
-				m.screen = screenOver
-			case "round_end":
-				m.screen = screenRound
-			default:
-				m.screen = screenGame
+			// Don't override overlay screens when we're in them.
+			if m.screen != screenScoreTable && m.screen != screenEventLog {
+				switch snap.Phase {
+				case "game_over":
+					m.screen = screenOver
+				case "round_end":
+					m.screen = screenRound
+				default:
+					m.screen = screenGame
+				}
 			}
 			// Rebuild display→server index mapping for the current sort mode.
 			m.displayToServer = buildSortMapping(snap.Hand, m.sortMode)
@@ -277,6 +309,7 @@ func (m Model) handleEnvelope(env protocol.Envelope) (Model, tea.Cmd) {
 		var e map[string]string
 		if err := json.Unmarshal(env.Payload, &e); err == nil {
 			m.events = append(m.events, e["text"])
+			m.appendEventHistory(e["text"])
 		}
 	}
 	return m, nil
@@ -301,6 +334,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleGameKey(key)
 	case screenRound, screenOver:
 		return m.handleRoundKey(key)
+	case screenScoreTable:
+		return m.handleScoreTableKey(key)
+	case screenEventLog:
+		return m.handleEventLogKey(key)
 	}
 	return m, nil
 }
@@ -496,6 +533,19 @@ func (m Model) handleGameKey(key string) (tea.Model, tea.Cmd) {
 			}
 			m.selected = newSelected
 		}
+	case "p", "P":
+		// Toggle score table overlay.
+		m.overlayFrom = screenGame
+		m.screen = screenScoreTable
+		return m, nil
+	case "L":
+		// Toggle event log overlay.
+		// NOTE: lowercase "l" is reserved for vim-right cursor movement, so only
+		// the shift variant opens the log from the game screen.
+		m.overlayFrom = screenGame
+		m.eventLogOffset = 0
+		m.screen = screenEventLog
+		return m, nil
 	case "esc":
 		m.selected = make(map[int]bool)
 	case "ctrl+c", "q":
@@ -510,10 +560,175 @@ func (m Model) handleRoundKey(key string) (tea.Model, tea.Cmd) {
 	if (key == "enter" || key == "n") && m.conn != nil {
 		_ = protocol.WriteJSON(m.conn, protocol.Command{Type: protocol.CmdNextRound})
 	}
-	if key == "q" || key == "ctrl+c" {
+	switch key {
+	case "p", "P":
+		m.overlayFrom = m.screen
+		m.screen = screenScoreTable
+	case "L":
+		m.overlayFrom = m.screen
+		m.eventLogOffset = 0
+		m.screen = screenEventLog
+	case "q", "ctrl+c":
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+// ─── Score table keys ─────────────────────────────────────────────────────────
+
+func (m Model) handleScoreTableKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc", "p", "P":
+		m.screen = m.overlayFrom
+	case "L":
+		// Switch directly to event log.
+		m.eventLogOffset = 0
+		m.screen = screenEventLog
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+// ─── Event log keys ───────────────────────────────────────────────────────────
+
+func (m Model) handleEventLogKey(key string) (tea.Model, tea.Cmd) {
+	visibleLines := m.logVisibleLines()
+	total := len(m.eventHistory)
+	maxOffset := total - visibleLines
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	switch key {
+	case "esc", "L":
+		m.screen = m.overlayFrom
+		m.eventLogOffset = 0
+	case "p", "P":
+		// Switch directly to score table.
+		m.screen = screenScoreTable
+	case "up", "k":
+		if m.eventLogOffset < maxOffset {
+			m.eventLogOffset++
+		}
+	case "down", "j":
+		if m.eventLogOffset > 0 {
+			m.eventLogOffset--
+		}
+	case "pgup":
+		m.eventLogOffset += visibleLines
+		if m.eventLogOffset > maxOffset {
+			m.eventLogOffset = maxOffset
+		}
+	case "pgdown":
+		m.eventLogOffset -= visibleLines
+		if m.eventLogOffset < 0 {
+			m.eventLogOffset = 0
+		}
+	case "ctrl+c", "q":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+// logVisibleLines returns the number of log lines that fit in the current terminal.
+func (m Model) logVisibleLines() int {
+	h := m.height
+	if h <= 0 {
+		h = 40
+	}
+	// Reserve 3 lines for title + help bar + 1 breathing room.
+	n := h - 3
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// ─── Event history helpers ────────────────────────────────────────────────────
+
+// appendEventHistory appends entries to the client-side event history, deduping
+// against the current tail and capping at maxClientEventHistory.
+func (m *Model) appendEventHistory(entries ...string) {
+	for _, e := range entries {
+		if e == "" {
+			continue
+		}
+		// Skip if this entry is already the last one (avoids duplicates from
+		// repeated state snapshots that include the same events).
+		if len(m.eventHistory) > 0 && m.eventHistory[len(m.eventHistory)-1] == e {
+			continue
+		}
+		m.eventHistory = append(m.eventHistory, e)
+	}
+	// Cap.
+	if len(m.eventHistory) > maxClientEventHistory {
+		m.eventHistory = m.eventHistory[len(m.eventHistory)-maxClientEventHistory:]
+	}
+}
+
+// mergeEventLogTail merges the server's tail into our local history without
+// duplicating entries we already have. Used on (re)connect to seed history with
+// context from before this session started.
+//
+// Strategy: find the longest suffix of `tail` that is also a suffix of our
+// history. Everything in `tail` before that overlap is genuinely new and must
+// be prepended.
+func (m *Model) mergeEventLogTail(tail []string) {
+	if len(tail) == 0 {
+		return
+	}
+	if len(m.eventHistory) == 0 {
+		// History empty — seed with the whole tail.
+		m.eventHistory = append([]string{}, tail...)
+		return
+	}
+	// Find the largest k such that tail[len(tail)-k:] == m.eventHistory suffix of length k.
+	// We look for the first i where tail[i:] is a suffix of m.eventHistory.
+	for i := 0; i <= len(tail); i++ {
+		candidate := tail[i:]
+		if len(candidate) == 0 {
+			// The whole tail is new (no overlap) — prepend it.
+			combined := make([]string, 0, len(tail)+len(m.eventHistory))
+			combined = append(combined, tail...)
+			combined = append(combined, m.eventHistory...)
+			m.eventHistory = combined
+			if len(m.eventHistory) > maxClientEventHistory {
+				m.eventHistory = m.eventHistory[len(m.eventHistory)-maxClientEventHistory:]
+			}
+			return
+		}
+		if m.hasSuffix(candidate) {
+			// tail[:i] are the new entries to prepend.
+			if i == 0 {
+				// Nothing new.
+				return
+			}
+			newEntries := tail[:i]
+			combined := make([]string, 0, len(newEntries)+len(m.eventHistory))
+			combined = append(combined, newEntries...)
+			combined = append(combined, m.eventHistory...)
+			m.eventHistory = combined
+			if len(m.eventHistory) > maxClientEventHistory {
+				m.eventHistory = m.eventHistory[len(m.eventHistory)-maxClientEventHistory:]
+			}
+			return
+		}
+	}
+}
+
+// hasSuffix returns true if candidate is a suffix of m.eventHistory.
+func (m *Model) hasSuffix(candidate []string) bool {
+	h := m.eventHistory
+	if len(candidate) > len(h) {
+		return false
+	}
+	offset := len(h) - len(candidate)
+	for i, e := range candidate {
+		if h[offset+i] != e {
+			return false
+		}
+	}
+	return true
 }
 
 // ─── View ─────────────────────────────────────────────────────────────────────
@@ -532,6 +747,10 @@ func (m Model) View() string {
 		return m.viewRoundSummary()
 	case screenOver:
 		return m.viewGameOver()
+	case screenScoreTable:
+		return m.viewScoreTable()
+	case screenEventLog:
+		return m.viewEventLog()
 	}
 	return ""
 }
@@ -650,10 +869,22 @@ func (m Model) viewGame() string {
 	b.WriteString(m.renderHand(s))
 	b.WriteString("\n")
 
-	// ── Event log ──
-	if len(m.events) > 0 {
-		last := m.events[len(m.events)-1]
-		b.WriteString(styleDim.Render("► "+last) + "\n")
+	// ── Event log (recent lines) ──
+	// Show up to 3 most recent lines when the terminal is tall enough; otherwise 1.
+	// We need at least ~4 extra lines above the help bar to show 3 (title=1, hand≈6,
+	// melds≈3, piles=4, opponents≈5 → ~19 minimum; 3 extra log lines require h≥22).
+	maxLogLines := 1
+	if m.height >= 26 {
+		maxLogLines = 3
+	} else if m.height >= 24 {
+		maxLogLines = 2
+	}
+	evts := m.events
+	if len(evts) > maxLogLines {
+		evts = evts[len(evts)-maxLogLines:]
+	}
+	for _, ev := range evts {
+		b.WriteString(styleDim.Render("► "+ev) + "\n")
 	}
 	if m.lastError != "" {
 		b.WriteString(styleErr.Render("✗ "+m.lastError) + "\n")
@@ -907,12 +1138,13 @@ func (m Model) renderHand(s *protocol.StateSnapshot) string {
 
 func (m Model) renderHelp(isMyTurn bool) string {
 	sortLabel := styleDim.Render("[S: " + m.sortMode.String() + "]")
+	overlayHints := styleDim.Render("  P:puntajes  Shift+L:log")
 	pickedNote := ""
 	if m.state != nil && m.state.PickedUpDiscard != nil {
 		pickedNote = stylePickedUp.Render("  [★ debés jugar " + m.state.PickedUpDiscard.Label + " antes de descartar]")
 	}
 	if !isMyTurn {
-		return styleHelp.Render("← →/h l: mover cursor  Espacio: seleccionar  S: ordenar  (esperando)") + " " + sortLabel + pickedNote + "\n"
+		return styleHelp.Render("← →/h l: mover cursor  Espacio: seleccionar  S: ordenar  (esperando)") + " " + sortLabel + overlayHints + pickedNote + "\n"
 	}
 	phase := ""
 	if m.state != nil {
@@ -920,9 +1152,9 @@ func (m Model) renderHelp(isMyTurn bool) string {
 	}
 	switch phase {
 	case "draw":
-		return styleHelp.Render("D: robar del mazo  T: tomar del pozo  S: ordenar") + " " + sortLabel + "\n"
+		return styleHelp.Render("D: robar del mazo  T: tomar del pozo  S: ordenar") + " " + sortLabel + overlayHints + "\n"
 	default:
-		return styleHelp.Render("Espacio: seleccionar  M: pierna  E: escalera  1-9: agregar en comb.#N  X: descartar  S: ordenar  Esc: limpiar") + " " + sortLabel + pickedNote + "\n"
+		return styleHelp.Render("Espacio: seleccionar  M: pierna  E: escalera  1-9: agregar en comb.#N  X: descartar  S: ordenar  Esc: limpiar") + " " + sortLabel + overlayHints + pickedNote + "\n"
 	}
 }
 
@@ -1030,7 +1262,7 @@ func (m Model) viewRoundSummary() string {
 		}
 	}
 
-	b.WriteString("\n" + styleHelp.Render("Enter / N: siguiente ronda  ·  Q: salir"))
+	b.WriteString("\n" + styleHelp.Render("Enter / N: siguiente ronda  ·  P: puntajes  ·  L: log  ·  Q: salir"))
 	return b.String()
 }
 
@@ -1093,6 +1325,174 @@ func (m Model) viewGameOver() string {
 	}
 
 	b.WriteString("\n" + styleHelp.Render("Q: salir"))
+	return b.String()
+}
+
+// ─── Score table view ─────────────────────────────────────────────────────────
+
+// viewScoreTable renders the full-screen per-round score table.
+// Rows = rounds ("Ronda 1", "Ronda 2", …), columns = players.
+// A bold "Total" row at the bottom matches the accumulated totals.
+// The player with the lowest total so far is highlighted (winner-so-far).
+func (m Model) viewScoreTable() string {
+	var b strings.Builder
+	b.WriteString(header())
+	b.WriteString(styleTitle.Render("Puntajes por ronda") + "\n\n")
+
+	if m.state == nil || len(m.state.ScoreHistory) == 0 {
+		b.WriteString(styleDim.Render("  (todavía no se completó ninguna ronda)") + "\n")
+		b.WriteString("\n" + styleHelp.Render("P / Esc: volver"))
+		return b.String()
+	}
+
+	history := m.state.ScoreHistory
+	players := m.state.Players
+
+	// Build ordered player ID list from the Players slice (preserves join order).
+	playerIDs := make([]string, 0, len(players))
+	playerNames := make([]string, 0, len(players))
+	for _, p := range players {
+		playerIDs = append(playerIDs, p.ID)
+		playerNames = append(playerNames, p.Name)
+	}
+
+	termWidth := m.width
+	if termWidth <= 0 {
+		termWidth = 100
+	}
+
+	// Compute per-column widths. Round label column is 8 chars wide.
+	// Player name columns: truncate to fit. Max 6 players; we try 10 chars first,
+	// then 8, then 6 if columns don't fit.
+	roundColW := 8
+	nameMaxLen := 10
+	// Each player col = max(nameMaxLen, 5) + 2 padding on each side + separator
+	playerColW := nameMaxLen + 2 // "  " + name + "  "
+	totalCols := roundColW + len(playerIDs)*(playerColW+1) // +1 for │ separator
+	if totalCols > termWidth {
+		nameMaxLen = 8
+		playerColW = nameMaxLen + 2
+		totalCols = roundColW + len(playerIDs)*(playerColW+1)
+	}
+	if totalCols > termWidth {
+		nameMaxLen = 6
+		playerColW = nameMaxLen + 2
+	}
+
+	// Separator line.
+	sep := strings.Repeat("─", roundColW)
+	for range playerIDs {
+		sep += "┼" + strings.Repeat("─", playerColW)
+	}
+
+	// Header row.
+	row := fmt.Sprintf("%-*s", roundColW, "Ronda")
+	for i, name := range playerNames {
+		_ = i
+		col := truncateName(name, nameMaxLen)
+		row += "│" + centerPad(col, playerColW)
+	}
+	b.WriteString(styleBadgeName.Render(row) + "\n")
+	b.WriteString(styleDim.Render(sep) + "\n")
+
+	// Accumulate totals as we render rows (for consistency with displayed values).
+	totals := make(map[string]int, len(playerIDs))
+
+	for _, rs := range history {
+		row = fmt.Sprintf("%-*s", roundColW, fmt.Sprintf("Ronda %d", rs.Round))
+		for _, id := range playerIDs {
+			pts := rs.Scores[id]
+			totals[id] += pts
+			cell := fmt.Sprintf("%d", pts)
+			row += "│" + centerPad(cell, playerColW)
+		}
+		b.WriteString(row + "\n")
+	}
+
+	// Separator before Total row.
+	totalSep := strings.Repeat("═", roundColW)
+	for range playerIDs {
+		totalSep += "╪" + strings.Repeat("═", playerColW)
+	}
+	b.WriteString(styleDim.Render(totalSep) + "\n")
+
+	// Find winner-so-far (lowest total).
+	winnerID := ""
+	winnerTotal := -1
+	for _, id := range playerIDs {
+		t := totals[id]
+		if winnerID == "" || t < winnerTotal {
+			winnerID = id
+			winnerTotal = t
+		}
+	}
+
+	// Total row.
+	totalRow := fmt.Sprintf("%-*s", roundColW, "Total")
+	for _, id := range playerIDs {
+		cell := fmt.Sprintf("%d", totals[id])
+		colStr := centerPad(cell, playerColW)
+		if id == winnerID {
+			totalRow += "│" + styleActive.Render(colStr)
+		} else {
+			totalRow += "│" + colStr
+		}
+	}
+	b.WriteString(styleBadgeName.Render(totalRow) + "\n")
+
+	b.WriteString("\n" + styleHelp.Render("P / Esc: volver  ·  L: historial"))
+	return b.String()
+}
+
+// centerPad pads s to width w, centering it with spaces.
+func centerPad(s string, w int) string {
+	runes := []rune(s)
+	n := len(runes)
+	if n >= w {
+		return string(runes[:w])
+	}
+	left := (w - n) / 2
+	right := w - n - left
+	return strings.Repeat(" ", left) + s + strings.Repeat(" ", right)
+}
+
+// ─── Event log view ───────────────────────────────────────────────────────────
+
+// viewEventLog renders the full-screen scrollable event log.
+// Newest entries are at the bottom. ↑/k scrolls toward older; ↓/j toward newer.
+func (m Model) viewEventLog() string {
+	var b strings.Builder
+	b.WriteString(header())
+	b.WriteString(styleTitle.Render("Historial de la partida") + "\n\n")
+
+	visibleLines := m.logVisibleLines()
+	total := len(m.eventHistory)
+
+	if total == 0 {
+		b.WriteString(styleDim.Render("  (sin eventos todavía)") + "\n")
+	} else {
+		// offset=0 → show newest (bottom), offset>0 → scroll up toward older.
+		// The slice to show: indices [start, end) in m.eventHistory.
+		end := total - m.eventLogOffset
+		start := end - visibleLines
+		if start < 0 {
+			start = 0
+		}
+		if end > total {
+			end = total
+		}
+		for _, ev := range m.eventHistory[start:end] {
+			b.WriteString(styleDim.Render("  " + ev) + "\n")
+		}
+		// Scroll indicator.
+		if total > visibleLines {
+			shown := end - start
+			indicator := fmt.Sprintf("  (%d–%d de %d)", start+1, start+shown, total)
+			b.WriteString(styleDim.Render(indicator) + "\n")
+		}
+	}
+
+	b.WriteString("\n" + styleHelp.Render("↑/k: arriba  ↓/j: abajo  PgUp/PgDn: página  L / Esc: volver  P: puntajes"))
 	return b.String()
 }
 

@@ -97,6 +97,14 @@ type RevealedPlayerHand struct {
 	IsWinner   bool       `json:"is_winner"`   // true for the player who went out
 }
 
+// RoundScoresView carries per-player scores for one completed round.
+// Included in StateSnapshot.ScoreHistory so clients can render the full table.
+type RoundScoresView struct {
+	Round  int            `json:"round"`
+	Scores map[string]int `json:"scores"` // player ID → points that round
+	Names  map[string]string `json:"names"`  // player ID → display name
+}
+
 // StateSnapshot is the full personalized game state sent to each client.
 type StateSnapshot struct {
 	Phase       string       `json:"phase"`
@@ -119,6 +127,18 @@ type StateSnapshot struct {
 	// verified by all players. Nil during normal play to keep other players'
 	// hands hidden.
 	RoundReveal []RevealedPlayerHand `json:"round_reveal,omitempty"`
+	// ScoreHistory carries the per-round per-player penalty history, oldest
+	// round first. Included in every snapshot; payload is small (rounds × players
+	// ints + names) and always-on is simpler than on-demand fetching.
+	ScoreHistory []RoundScoresView `json:"score_history,omitempty"`
+	// EventLogTail is the last ~50 events from the game's lifetime log. It is
+	// included in every snapshot so a reconnecting client immediately has recent
+	// context without needing a separate request. The client keeps its own
+	// unbounded local history; EventLogTail is only needed on (re)connect.
+	// Design note: we send the tail always (not only on reconnect) because the
+	// server cannot cheaply distinguish a fresh connect from a reconnect at the
+	// snapshot-builder level. The cost is negligible: ≤50 short strings per update.
+	EventLogTail []string `json:"event_log_tail,omitempty"`
 }
 
 // Envelope wraps any server→client message.

@@ -76,6 +76,22 @@ type RoundResult struct {
 	Results []PlayerRoundResult
 }
 
+// RoundScores holds the per-player scores for a single completed round.
+// It is appended to ScoreHistory in the Game when endRound runs.
+type RoundScores struct {
+	Round  int
+	// Scores maps player ID → points earned that round (0 = round winner).
+	Scores map[string]int
+	// Names maps player ID → display name (snapshot at round end; stable across rounds).
+	Names  map[string]string
+}
+
+// maxEventLog is the cap for the game-level event log. The log grows without
+// bound during a round (startRound clears it), but on reconnect we only send
+// the tail (see EventLogTail). Keeping a hard cap here avoids unbounded growth
+// if a very long round with many chat messages occurs.
+const maxEventLog = 500
+
 // Game is the authoritative server-side game state.
 type Game struct {
 	Players         []*Player
@@ -85,9 +101,28 @@ type Game struct {
 	Phase           Phase
 	ActiveIndex     int // index into Players of whose turn it is
 	Round           int
-	Events          []string // append-only event log (recent lines broadcast to clients)
-	LastRoundResult *RoundResult // reveal data for the most recently completed round
+	Events          []string // per-round event log; cleared at startRound
+	// FullEventLog is the lifetime event log across all rounds, capped at
+	// maxEventLog. The server uses this to send a backlog to reconnecting clients
+	// so they have context even if the current-round Events slice was just cleared.
+	FullEventLog    []string
+	ScoreHistory    []RoundScores // one entry per completed round, oldest first
+	LastRoundResult *RoundResult  // reveal data for the most recently completed round
 	rng             *rand.Rand
+}
+
+// EventLogTail returns the last n entries from FullEventLog. If n <= 0 all
+// entries are returned. The returned slice is a copy; callers may mutate it.
+func (g *Game) EventLogTail(n int) []string {
+	src := g.FullEventLog
+	if n <= 0 || n >= len(src) {
+		result := make([]string, len(src))
+		copy(result, src)
+		return result
+	}
+	result := make([]string, n)
+	copy(result, src[len(src)-n:])
+	return result
 }
 
 // NewGame creates and shuffles a new game for the given player IDs/names.
@@ -126,6 +161,8 @@ func (g *Game) startRound() {
 	}
 	g.Melds = nil
 	g.Events = nil
+	// NOTE: g.FullEventLog and g.ScoreHistory are NOT cleared here — they
+	// accumulate across rounds so clients can view the full game history.
 
 	// Deal hands.
 	cursor := 0
@@ -165,6 +202,11 @@ func (g *Game) PlayerByID(id string) *Player {
 
 func (g *Game) addEvent(msg string) {
 	g.Events = append(g.Events, msg)
+	g.FullEventLog = append(g.FullEventLog, msg)
+	// Cap the lifetime log to avoid unbounded growth in very long games.
+	if len(g.FullEventLog) > maxEventLog {
+		g.FullEventLog = g.FullEventLog[len(g.FullEventLog)-maxEventLog:]
+	}
 }
 
 // AddEvent appends a message to the event log. Use this from outside the
@@ -486,6 +528,11 @@ func (g *Game) endRound(winner *Player) error {
 	// Capture the round reveal AFTER scoring so RoundScore/TotalScore are final,
 	// but while the hands are still intact (startRound clears them later).
 	rr := &RoundResult{Round: g.Round}
+	rs := RoundScores{
+		Round:  g.Round,
+		Scores: make(map[string]int, len(g.Players)),
+		Names:  make(map[string]string, len(g.Players)),
+	}
 	for _, p := range g.Players {
 		handCopy := make(Hand, len(p.Hand))
 		copy(handCopy, p.Hand)
@@ -496,8 +543,11 @@ func (g *Game) endRound(winner *Player) error {
 			RoundScore: p.RoundScore,
 			TotalScore: p.TotalScore,
 		})
+		rs.Scores[p.ID] = p.RoundScore
+		rs.Names[p.ID] = p.Name
 	}
 	g.LastRoundResult = rr
+	g.ScoreHistory = append(g.ScoreHistory, rs)
 
 	// Check if game is over.
 	for _, p := range g.Players {

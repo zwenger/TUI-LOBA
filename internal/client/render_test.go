@@ -564,3 +564,287 @@ func TestRenderVisual5Opponents(t *testing.T) {
 		fmt.Printf("\n=== Opponents at width %d ===\n%s", w, section)
 	}
 }
+
+// ─── Score table tests ────────────────────────────────────────────────────────
+
+// makeScoreHistoryState builds a snapshot with 4 players and 3 rounds of
+// score history for score-table render tests.
+func makeScoreHistoryState() *protocol.StateSnapshot {
+	playerIDs := []string{"p1", "p2", "p3", "p4"}
+	names := map[string]string{
+		"p1": "Alice",
+		"p2": "Bob",
+		"p3": "Carol",
+		"p4": "Dave",
+	}
+
+	history := []protocol.RoundScoresView{
+		{
+			Round:  1,
+			Scores: map[string]int{"p1": 0, "p2": 15, "p3": 7, "p4": 22},
+			Names:  names,
+		},
+		{
+			Round:  2,
+			Scores: map[string]int{"p1": 10, "p2": 0, "p3": 25, "p4": 5},
+			Names:  names,
+		},
+		{
+			Round:  3,
+			Scores: map[string]int{"p1": 0, "p2": 8, "p3": 12, "p4": 30},
+			Names:  names,
+		},
+	}
+
+	players := make([]protocol.PlayerView, len(playerIDs))
+	totals := map[string]int{}
+	for _, rs := range history {
+		for id, pts := range rs.Scores {
+			totals[id] += pts
+		}
+	}
+	for i, id := range playerIDs {
+		players[i] = protocol.PlayerView{
+			ID:         id,
+			Name:       names[id],
+			TotalScore: totals[id],
+			Connected:  true,
+			IsSelf:     id == "p1",
+		}
+	}
+
+	return &protocol.StateSnapshot{
+		Phase:        "draw",
+		Round:        4,
+		Players:      players,
+		ScoreHistory: history,
+	}
+}
+
+// TestRenderScoreTableVisual is a human-readable print test at width 100
+// with 4 players × 3 rounds. Run with: go test -v -run TestRenderScoreTableVisual
+func TestRenderScoreTableVisual(t *testing.T) {
+	snap := makeScoreHistoryState()
+	m := Model{
+		screen:          screenScoreTable,
+		selfID:          "p1",
+		state:           snap,
+		overlayFrom:     screenGame,
+		width:           100,
+		height:          40,
+		displayToServer: []int{},
+	}
+
+	view := m.viewScoreTable()
+	fmt.Println("\n=== Score Table (width 100, 4 players × 3 rounds) ===")
+	fmt.Println(view)
+
+	if strings.TrimSpace(view) == "" {
+		t.Error("viewScoreTable() returned empty string")
+	}
+	// Must contain all player names.
+	for _, name := range []string{"Alice", "Bob", "Carol", "Dave"} {
+		if !strings.Contains(view, name) {
+			t.Errorf("score table missing player name %q", name)
+		}
+	}
+	// Must contain round labels.
+	for _, label := range []string{"Ronda 1", "Ronda 2", "Ronda 3"} {
+		if !strings.Contains(view, label) {
+			t.Errorf("score table missing round label %q", label)
+		}
+	}
+	// Must contain the Total row.
+	if !strings.Contains(view, "Total") {
+		t.Error("score table missing Total row")
+	}
+}
+
+// TestScoreTableEmptyHistory verifies that the score table handles zero rounds
+// gracefully (no panic).
+func TestScoreTableEmptyHistory(t *testing.T) {
+	snap := &protocol.StateSnapshot{
+		Phase:   "draw",
+		Round:   1,
+		Players: []protocol.PlayerView{{ID: "p1", Name: "Alice", IsSelf: true, Connected: true}},
+	}
+	m := Model{
+		screen:      screenScoreTable,
+		selfID:      "p1",
+		state:       snap,
+		overlayFrom: screenGame,
+		width:       100,
+		height:      40,
+	}
+	view := m.viewScoreTable()
+	if strings.TrimSpace(view) == "" {
+		t.Error("viewScoreTable() with empty history returned empty string")
+	}
+}
+
+// TestScoreTableTotalsCorrect verifies that the Total row in the score table
+// matches the sum of per-round scores for each player.
+func TestScoreTableTotalsCorrect(t *testing.T) {
+	snap := makeScoreHistoryState()
+	m := Model{
+		screen:      screenScoreTable,
+		selfID:      "p1",
+		state:       snap,
+		overlayFrom: screenGame,
+		width:       100,
+		height:      40,
+	}
+	view := m.viewScoreTable()
+
+	// Alice: rounds 1+2+3 = 0+10+0 = 10; expect "10" in Total row context.
+	// Bob:   0+15+8 = 23 (wait, round 1 scores: p2=15; round 2: p2=0; round 3: p2=8 → 23).
+	// Just verify the view contains the expected totals.
+	wantTotals := map[string]int{
+		"p1": 10,
+		"p2": 23,
+		"p3": 44,
+		"p4": 57,
+	}
+	for id, want := range wantTotals {
+		cell := fmt.Sprintf("%d", want)
+		if !strings.Contains(view, cell) {
+			t.Errorf("score table missing total %s for player %s", cell, id)
+		}
+	}
+}
+
+// ─── Event log tests ──────────────────────────────────────────────────────────
+
+// TestEventLogScrollBoundsNoPanic verifies that scrolling at the top and bottom
+// of the event log does not panic or produce invalid state.
+func TestEventLogScrollBoundsNoPanic(t *testing.T) {
+	m := Model{
+		screen:         screenEventLog,
+		overlayFrom:    screenGame,
+		width:          100,
+		height:         40,
+		eventLogOffset: 0,
+		eventHistory:   []string{"event-1", "event-2", "event-3"},
+	}
+
+	// Scroll up past the top — must clamp, not panic.
+	for i := 0; i < 20; i++ {
+		result, _ := m.handleEventLogKey("up")
+		m = result.(Model)
+	}
+	// Should still render without panic.
+	view := m.viewEventLog()
+	if strings.TrimSpace(view) == "" {
+		t.Error("viewEventLog() returned empty string after scrolling up")
+	}
+
+	// Scroll back down past the bottom.
+	for i := 0; i < 20; i++ {
+		result, _ := m.handleEventLogKey("down")
+		m = result.(Model)
+	}
+	if m.eventLogOffset < 0 {
+		t.Errorf("eventLogOffset went negative: %d", m.eventLogOffset)
+	}
+}
+
+// TestEventLogEmptyNoPanic verifies no panic when event history is empty.
+func TestEventLogEmptyNoPanic(t *testing.T) {
+	m := Model{
+		screen:      screenEventLog,
+		overlayFrom: screenGame,
+		width:       100,
+		height:      40,
+	}
+	view := m.viewEventLog()
+	if strings.TrimSpace(view) == "" {
+		t.Error("viewEventLog() with empty history returned empty string")
+	}
+}
+
+// TestEventHistoryAppendDedup verifies that appending the same entry twice
+// in a row is deduplicated, and that the cap is respected.
+func TestEventHistoryAppendDedup(t *testing.T) {
+	m := Model{}
+	m.appendEventHistory("A")
+	m.appendEventHistory("A") // duplicate → must not be added
+	if len(m.eventHistory) != 1 {
+		t.Errorf("expected 1 entry after dedup, got %d", len(m.eventHistory))
+	}
+	m.appendEventHistory("B")
+	if len(m.eventHistory) != 2 {
+		t.Errorf("expected 2 entries, got %d", len(m.eventHistory))
+	}
+
+	// Fill to over the cap.
+	for i := 0; i < maxClientEventHistory+10; i++ {
+		m.appendEventHistory(fmt.Sprintf("ev-%d", i))
+	}
+	if len(m.eventHistory) > maxClientEventHistory {
+		t.Errorf("eventHistory exceeded cap: %d > %d", len(m.eventHistory), maxClientEventHistory)
+	}
+}
+
+// TestEventLogScrollBoundsWithManyEntries verifies PgUp/PgDn clamp correctly
+// for a larger history than the visible window.
+func TestEventLogScrollBoundsWithManyEntries(t *testing.T) {
+	history := make([]string, 100)
+	for i := range history {
+		history[i] = fmt.Sprintf("event-%03d", i)
+	}
+	m := Model{
+		screen:         screenEventLog,
+		overlayFrom:    screenGame,
+		width:          100,
+		height:         30, // ~27 visible lines
+		eventLogOffset: 0,
+		eventHistory:   history,
+	}
+
+	// PgUp many times.
+	for i := 0; i < 10; i++ {
+		result, _ := m.handleEventLogKey("pgup")
+		m = result.(Model)
+	}
+	visibleLines := m.logVisibleLines()
+	maxOffset := len(history) - visibleLines
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.eventLogOffset > maxOffset {
+		t.Errorf("eventLogOffset %d exceeded max %d after PgUp", m.eventLogOffset, maxOffset)
+	}
+
+	// PgDn back to bottom.
+	for i := 0; i < 10; i++ {
+		result, _ := m.handleEventLogKey("pgdown")
+		m = result.(Model)
+	}
+	if m.eventLogOffset < 0 {
+		t.Errorf("eventLogOffset went negative: %d", m.eventLogOffset)
+	}
+}
+
+// TestMergeEventLogTail verifies that merging a server tail into an empty
+// history seeds it, and that merging an already-present tail is a no-op.
+func TestMergeEventLogTail(t *testing.T) {
+	m := Model{}
+	tail := []string{"A", "B", "C"}
+	m.mergeEventLogTail(tail)
+	if len(m.eventHistory) != 3 {
+		t.Fatalf("expected 3 entries after seed, got %d", len(m.eventHistory))
+	}
+
+	// Merging the same tail again must not duplicate.
+	m.mergeEventLogTail(tail)
+	if len(m.eventHistory) != 3 {
+		t.Errorf("expected 3 entries after second merge, got %d", len(m.eventHistory))
+	}
+
+	// Merging a longer tail that includes our current content plus new prefix.
+	m.mergeEventLogTail([]string{"X", "Y", "A", "B", "C"})
+	// "X" and "Y" are new; "A","B","C" are already there.
+	if len(m.eventHistory) < 5 {
+		t.Errorf("expected at least 5 entries after extended merge, got %d: %v", len(m.eventHistory), m.eventHistory)
+	}
+}
