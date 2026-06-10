@@ -780,6 +780,33 @@ func buildSnapshot(g *game.Game, selfID string) protocol.StateSnapshot {
 		}
 	}
 
+	// Round reveal: only during round_end and game_over phases.
+	if (g.Phase == game.PhaseRoundEnd || g.Phase == game.PhaseGameOver) && g.LastRoundResult != nil {
+		rr := g.LastRoundResult
+		// Determine the round winner: the player whose RoundScore == 0 and hand was empty.
+		// In LastRoundResult the winner is the player with an empty hand.
+		winnerID := ""
+		for _, pr := range rr.Results {
+			if len(pr.Hand) == 0 {
+				winnerID = pr.PlayerID
+				break
+			}
+		}
+		for _, pr := range rr.Results {
+			rph := protocol.RevealedPlayerHand{
+				PlayerID:   pr.PlayerID,
+				PlayerName: pr.PlayerName,
+				RoundScore: pr.RoundScore,
+				TotalScore: pr.TotalScore,
+				IsWinner:   pr.PlayerID == winnerID,
+			}
+			for _, c := range pr.Hand {
+				rph.Cards = append(rph.Cards, cardView(c, false))
+			}
+			snap.RoundReveal = append(snap.RoundReveal, rph)
+		}
+	}
+
 	// Melds.
 	for i, m := range g.Melds {
 		mv := protocol.MeldView{

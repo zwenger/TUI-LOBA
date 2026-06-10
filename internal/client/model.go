@@ -928,12 +928,98 @@ func (m Model) renderHelp(isMyTurn bool) string {
 
 // ─── Round summary view ───────────────────────────────────────────────────────
 
+// renderRevealBlock renders one player's round-end reveal as a bordered block:
+// name row, mini-card strip, score breakdown line.
+func renderRevealBlock(rph protocol.RevealedPlayerHand, termWidth int) string {
+	// Name / winner marker.
+	nameStr := rph.PlayerName
+	if rph.IsWinner {
+		nameStr = styleActive.Render("★ " + nameStr + " — ganó la mano")
+	} else {
+		nameStr = styleBadgeName.Render(nameStr)
+	}
+
+	// Card strip with per-card value annotation.
+	var cardBlocks []string
+	var valueLabels []string
+	for _, cv := range rph.Cards {
+		c := cv
+		cardBlocks = append(cardBlocks, renderMiniCard(&c))
+		val := cardPenaltyValue(cv)
+		valueLabels = append(valueLabels, styleDim.Render(fmt.Sprintf("%2d", val)))
+	}
+
+	var cardStrip string
+	if len(cardBlocks) == 0 {
+		cardStrip = styleDim.Render("  (mano vacía)")
+	} else {
+		cardStrip = lipgloss.JoinHorizontal(lipgloss.Top, cardBlocks...)
+	}
+
+	// Score breakdown: "K♠+Q♦+5♣ = 10+10+5 = 25" style.
+	scoreBreakdown := buildScoreBreakdown(rph.Cards, rph.RoundScore)
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		nameStr,
+		cardStrip,
+		styleDim.Render(scoreBreakdown),
+	)
+
+	// Use winner-highlighted or normal border.
+	if rph.IsWinner {
+		return styleBadgeActive.Render(content)
+	}
+	return styleBadgeNormal.Render(content)
+}
+
+// cardPenaltyValue returns the penalty value for a CardView (mirrors game.Rank.Score).
+func cardPenaltyValue(cv protocol.CardView) int {
+	switch {
+	case cv.Rank == 0: // joker
+		return 25
+	case cv.Rank == 1: // ace
+		return 15
+	case cv.Rank >= 11: // J, Q, K
+		return 10
+	default:
+		return cv.Rank
+	}
+}
+
+// buildScoreBreakdown builds a human-readable score formula, e.g.
+// "K♠+Q♦+5♣ = 10+10+5 = 25" or "+0 pts esta mano" for the round winner.
+func buildScoreBreakdown(cards []protocol.CardView, total int) string {
+	if len(cards) == 0 {
+		return "+0 pts esta mano"
+	}
+	var labels []string
+	var values []string
+	for _, cv := range cards {
+		labels = append(labels, cardLabelFromView(cv))
+		values = append(values, fmt.Sprintf("%d", cardPenaltyValue(cv)))
+	}
+	cardPart := strings.Join(labels, "+")
+	valPart := strings.Join(values, "+")
+	if len(cards) == 1 {
+		return fmt.Sprintf("%s = %d pts esta mano", cardPart, total)
+	}
+	return fmt.Sprintf("%s = %s = %d pts esta mano", cardPart, valPart, total)
+}
+
 func (m Model) viewRoundSummary() string {
 	var b strings.Builder
 	b.WriteString(header())
-	b.WriteString(styleTitle.Render(fmt.Sprintf("Ronda %d — Fin", m.state.Round)) + "\n\n")
 
+	round := 0
 	if m.state != nil {
+		round = m.state.Round
+	}
+	b.WriteString(styleTitle.Render(fmt.Sprintf("Ronda %d — Fin", round)) + "\n\n")
+
+	if m.state != nil && len(m.state.RoundReveal) > 0 {
+		b.WriteString(m.renderRevealSection(m.state.RoundReveal))
+	} else if m.state != nil {
+		// Fallback: no reveal data (shouldn't happen in normal flow).
 		for _, p := range m.state.Players {
 			line := fmt.Sprintf("  %-20s  esta ronda: +%d   total: %d",
 				p.Name, p.RoundScore, p.TotalScore)
@@ -948,6 +1034,22 @@ func (m Model) viewRoundSummary() string {
 	return b.String()
 }
 
+// renderRevealSection renders all player reveal blocks wrapped to terminal width.
+func (m Model) renderRevealSection(reveal []protocol.RevealedPlayerHand) string {
+	termWidth := m.width
+	if termWidth <= 0 {
+		termWidth = 100
+	}
+
+	blocks := make([]string, len(reveal))
+	for i, rph := range reveal {
+		blocks[i] = renderRevealBlock(rph, termWidth)
+	}
+
+	// Wrap blocks like badges / melds: fill rows left-to-right.
+	return wrapBadges(blocks, termWidth, 1) + "\n"
+}
+
 // ─── Game over view ───────────────────────────────────────────────────────────
 
 func (m Model) viewGameOver() string {
@@ -960,9 +1062,32 @@ func (m Model) viewGameOver() string {
 	}
 	b.WriteString(styleWinner.Render(fmt.Sprintf("🏆  GANADOR: %s", winner)) + "\n\n")
 
-	if m.state != nil {
-		for _, p := range m.state.Players {
-			line := fmt.Sprintf("  %-20s  total: %d", p.Name, p.TotalScore)
+	// Show the last-round reveal (same component as round summary).
+	if m.state != nil && len(m.state.RoundReveal) > 0 {
+		b.WriteString(styleTitle.Render("Última mano") + "\n")
+		b.WriteString(m.renderRevealSection(m.state.RoundReveal))
+		b.WriteString("\n")
+	}
+
+	// Final standings sorted by total score (lowest first, winner highlighted).
+	if m.state != nil && len(m.state.Players) > 0 {
+		b.WriteString(styleTitle.Render("Clasificación final") + "\n")
+
+		// Sort a copy by TotalScore ascending.
+		sorted := make([]protocol.PlayerView, len(m.state.Players))
+		copy(sorted, m.state.Players)
+		for i := 0; i < len(sorted); i++ {
+			for j := i + 1; j < len(sorted); j++ {
+				if sorted[j].TotalScore < sorted[i].TotalScore {
+					sorted[i], sorted[j] = sorted[j], sorted[i]
+				}
+			}
+		}
+		for pos, p := range sorted {
+			line := fmt.Sprintf("  %d. %-20s  total: %d", pos+1, p.Name, p.TotalScore)
+			if p.ID == m.state.WinnerID {
+				line = styleActive.Render(line + "  ← GANADOR")
+			}
 			b.WriteString(line + "\n")
 		}
 	}

@@ -354,6 +354,185 @@ func TestOpponentActiveHighlight(t *testing.T) {
 	}
 }
 
+// ─── Round summary reveal render tests ───────────────────────────────────────
+
+// makeRoundReveal builds a sample RoundReveal slice for render testing:
+// Alice won (empty hand), Bob holds K♠+Q♦+5♣ = 10+10+5 = 25,
+// Carol holds a Joker = 25.
+func makeRoundReveal() []protocol.RevealedPlayerHand {
+	return []protocol.RevealedPlayerHand{
+		{
+			PlayerID:   "p1",
+			PlayerName: "Alice",
+			Cards:      nil, // empty — won the round
+			RoundScore: 0,
+			TotalScore: 45,
+			IsWinner:   true,
+		},
+		{
+			PlayerID:   "p2",
+			PlayerName: "Bob",
+			Cards: []protocol.CardView{
+				{Rank: 13, Suit: 0, Label: "K♠"}, // K♠ = 10
+				{Rank: 12, Suit: 2, Label: "Q♦"}, // Q♦ = 10
+				{Rank: 5, Suit: 3, Label: " 5♣"}, // 5♣ = 5
+			},
+			RoundScore: 25,
+			TotalScore: 60,
+		},
+		{
+			PlayerID:   "p3",
+			PlayerName: "Carol",
+			Cards: []protocol.CardView{
+				{Rank: 0, Suit: 0, Label: "★JKR"}, // Joker = 25
+			},
+			RoundScore: 25,
+			TotalScore: 72,
+		},
+	}
+}
+
+// TestRenderRoundSummaryVisual prints the full round-summary view at width 100
+// so the developer can inspect it. Always passes.
+// Run with: go test -v -run TestRenderRoundSummaryVisual
+func TestRenderRoundSummaryVisual(t *testing.T) {
+	snap := &protocol.StateSnapshot{
+		Phase:       "round_end",
+		Round:       3,
+		RoundReveal: makeRoundReveal(),
+		Players: []protocol.PlayerView{
+			{ID: "p1", Name: "Alice", TotalScore: 45, IsSelf: true, Connected: true},
+			{ID: "p2", Name: "Bob", TotalScore: 60, Connected: true},
+			{ID: "p3", Name: "Carol", TotalScore: 72, Connected: true},
+		},
+	}
+
+	m := Model{
+		screen: screenRound,
+		selfID: "p1",
+		state:  snap,
+		width:  100,
+		height: 40,
+	}
+
+	view := m.viewRoundSummary()
+	fmt.Println("\n=== Round Summary (width 100) ===")
+	fmt.Println(view)
+
+	if strings.TrimSpace(view) == "" {
+		t.Error("viewRoundSummary() returned empty string")
+	}
+	// Must contain the winner marker.
+	if !strings.Contains(view, "ganó la mano") {
+		t.Error("round summary missing 'ganó la mano' winner marker")
+	}
+	// Must contain a score breakdown for Bob.
+	if !strings.Contains(view, "25") {
+		t.Error("round summary missing Bob's penalty total 25")
+	}
+}
+
+// TestRenderGameOverVisual prints the game-over view at width 100.
+// Always passes; run with: go test -v -run TestRenderGameOverVisual
+func TestRenderGameOverVisual(t *testing.T) {
+	snap := &protocol.StateSnapshot{
+		Phase:       "game_over",
+		Round:       5,
+		WinnerID:    "p1",
+		WinnerName:  "Alice",
+		RoundReveal: makeRoundReveal(),
+		Players: []protocol.PlayerView{
+			{ID: "p1", Name: "Alice", TotalScore: 45, IsSelf: true, Connected: true},
+			{ID: "p2", Name: "Bob", TotalScore: 102, Connected: true},
+			{ID: "p3", Name: "Carol", TotalScore: 88, Connected: true},
+		},
+	}
+
+	m := Model{
+		screen: screenOver,
+		selfID: "p1",
+		state:  snap,
+		width:  100,
+		height: 40,
+	}
+
+	view := m.viewGameOver()
+	fmt.Println("\n=== Game Over (width 100) ===")
+	fmt.Println(view)
+
+	if strings.TrimSpace(view) == "" {
+		t.Error("viewGameOver() returned empty string")
+	}
+	if !strings.Contains(view, "GANADOR") {
+		t.Error("game over missing GANADOR")
+	}
+	// Final standings must show Alice first (lowest score).
+	if !strings.Contains(view, "1. ") {
+		t.Error("game over missing position markers in standings")
+	}
+}
+
+// TestRoundSummaryRevealBlocks verifies that every reveal block renders without
+// panicking and contains the player name.
+func TestRoundSummaryRevealBlocks(t *testing.T) {
+	reveal := makeRoundReveal()
+	for _, rph := range reveal {
+		block := renderRevealBlock(rph, 100)
+		if !strings.Contains(block, rph.PlayerName) {
+			t.Errorf("reveal block for %s missing player name\nblock:\n%s", rph.PlayerName, block)
+		}
+	}
+}
+
+// TestScoreBreakdownFormula verifies buildScoreBreakdown produces sensible output.
+func TestScoreBreakdownFormula(t *testing.T) {
+	cards := []protocol.CardView{
+		{Rank: 13, Suit: 0, Label: "K♠"},
+		{Rank: 12, Suit: 2, Label: "Q♦"},
+		{Rank: 5, Suit: 3, Label: " 5♣"},
+	}
+	result := buildScoreBreakdown(cards, 25)
+	if !strings.Contains(result, "25") {
+		t.Errorf("buildScoreBreakdown missing total 25, got: %s", result)
+	}
+	// Must contain individual values.
+	if !strings.Contains(result, "10") {
+		t.Errorf("buildScoreBreakdown missing face-card value 10, got: %s", result)
+	}
+}
+
+// TestScoreBreakdownEmpty verifies that an empty hand returns the winner string.
+func TestScoreBreakdownEmpty(t *testing.T) {
+	result := buildScoreBreakdown(nil, 0)
+	if result != "+0 pts esta mano" {
+		t.Errorf("buildScoreBreakdown(nil) = %q, want '+0 pts esta mano'", result)
+	}
+}
+
+// TestCardPenaltyValues verifies cardPenaltyValue for each rule-relevant rank.
+func TestCardPenaltyValues(t *testing.T) {
+	cases := []struct {
+		rank int
+		want int
+	}{
+		{0, 25},  // Joker
+		{1, 15},  // Ace
+		{2, 2},   // 2
+		{5, 5},   // 5
+		{10, 10}, // 10
+		{11, 10}, // Jack
+		{12, 10}, // Queen
+		{13, 10}, // King
+	}
+	for _, tc := range cases {
+		cv := protocol.CardView{Rank: tc.rank, Suit: 0}
+		got := cardPenaltyValue(cv)
+		if got != tc.want {
+			t.Errorf("cardPenaltyValue(rank=%d) = %d, want %d", tc.rank, got, tc.want)
+		}
+	}
+}
+
 // TestRenderVisual5Opponents is a visual sanity test: prints a 5-opponent
 // layout at width 100 and width 60 so the developer can inspect output.
 // Always passes; run with: go test -v -run TestRenderVisual5Opponents

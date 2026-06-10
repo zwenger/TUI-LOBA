@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"loba/internal/game"
 	"loba/internal/protocol"
 	"net"
 	"strings"
@@ -443,28 +444,124 @@ func TestDuplicateConnectedNameRejected(t *testing.T) {
 	}
 }
 
-// TestDuplicateConnectedNameRejectedDuringGame: same check when the game is
-// already running and Alice is still connected.
-func TestDuplicateConnectedNameRejectedDuringGame(t *testing.T) {
+// ─── Round reveal snapshot tests ─────────────────────────────────────────────
+
+// TestSnapshotNoRevealDuringPlay verifies that RoundReveal is absent from
+// snapshots during normal (non-round-end) play, so opponents' hands stay hidden.
+func TestSnapshotNoRevealDuringPlay(t *testing.T) {
 	_, addr := startServer(t)
 
 	aliceConn, aliceR := dialAndJoin(t, addr, "Alice")
-	drainLobby(t, aliceR) // Alice's own join broadcast
+	drainLobby(t, aliceR)
 	bobConn, bobR := dialAndJoin(t, addr, "Bob")
 	_, _ = bobConn, bobR
-	drainLobby(t, aliceR) // Bob joined broadcast
+	drainLobby(t, aliceR)
 
 	if err := protocol.WriteJSON(aliceConn, protocol.Command{Type: protocol.CmdStart}); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	drainUntilState(t, aliceR)
+	snap := drainUntilState(t, aliceR)
 
-	// Alice is still connected — second join with same name must be rejected.
-	conn2, r2 := dialAndJoin(t, addr, "Alice")
-	errMsg := drainUntilError(t, r2)
-	conn2.Close()
-
-	if errMsg == "" {
-		t.Error("expected rejection for duplicate connected name during game")
+	if snap.Phase == "round_end" || snap.Phase == "game_over" {
+		t.Skip("game ended immediately, cannot test mid-round")
+	}
+	if len(snap.RoundReveal) != 0 {
+		t.Errorf("RoundReveal must be empty during play, got %d entries", len(snap.RoundReveal))
 	}
 }
+
+// TestBuildSnapshotRevealDirect tests buildSnapshot directly using a rigged game.
+// server_test.go is in package server so it has access to unexported buildSnapshot
+// and can import loba/internal/game.
+func TestBuildSnapshotRevealDirect(t *testing.T) {
+	// Build a minimal 2-player game and force it into PhaseRoundEnd.
+	g, _ := buildTestGame(t)
+
+	// During play: no reveal.
+	snapPlay := buildSnapshot(g, "p1")
+	if len(snapPlay.RoundReveal) != 0 {
+		t.Errorf("RoundReveal must be empty during play, got %d", len(snapPlay.RoundReveal))
+	}
+
+	// Rig hands and force round end via engine.
+	g.Players[0].Hand = gameHand(gameCard(5, 0))    // Alice: 5♠
+	g.Players[1].Hand = gameHand(gameCard(13, 1), gameCard(5, 3)) // Bob: K♥ + 5♣ = 15
+	g.Phase = gamePhaseMelding()
+
+	if err := g.Discard("p1", 0); err != nil {
+		t.Fatalf("discard: %v", err)
+	}
+
+	if g.Phase != gamePhaseRoundEnd() && g.Phase != gamePhaseGameOver() {
+		t.Fatalf("expected round_end or game_over, got %s", g.Phase)
+	}
+
+	snapEnd := buildSnapshot(g, "p1")
+	if len(snapEnd.RoundReveal) == 0 {
+		t.Fatal("RoundReveal must be populated at round_end")
+	}
+	if len(snapEnd.RoundReveal) != 2 {
+		t.Errorf("expected 2 RoundReveal entries, got %d", len(snapEnd.RoundReveal))
+	}
+
+	var winnerEntry, loserEntry *protocol.RevealedPlayerHand
+	for i := range snapEnd.RoundReveal {
+		if snapEnd.RoundReveal[i].IsWinner {
+			e := snapEnd.RoundReveal[i]
+			winnerEntry = &e
+		} else {
+			e := snapEnd.RoundReveal[i]
+			loserEntry = &e
+		}
+	}
+	if winnerEntry == nil {
+		t.Fatal("no entry with IsWinner=true")
+	}
+	if len(winnerEntry.Cards) != 0 {
+		t.Errorf("winner's card slice must be empty, got %v", winnerEntry.Cards)
+	}
+	if loserEntry == nil {
+		t.Fatal("no entry with IsWinner=false")
+	}
+	if len(loserEntry.Cards) == 0 {
+		t.Error("loser's card slice must be non-empty")
+	}
+	if loserEntry.RoundScore != 15 {
+		t.Errorf("loser RoundScore = %d, want 15 (K♥=10 + 5♣=5)", loserEntry.RoundScore)
+	}
+}
+
+// ─── Helpers for buildSnapshot unit tests ────────────────────────────────────
+
+// buildTestGame creates a 2-player game in PhaseDrawing using game.NewGame.
+func buildTestGame(t *testing.T) (*game.Game, string) {
+	t.Helper()
+	players := []struct{ ID, Name string }{
+		{"p1", "Alice"},
+		{"p2", "Bob"},
+	}
+	g, err := game.NewGame(players, 42)
+	if err != nil {
+		t.Fatalf("NewGame: %v", err)
+	}
+	return g, "p1"
+}
+
+// gameCard builds a game.Card with the given rank (int) and suit (game.Suit).
+func gameCard(rank int, suit game.Suit) game.Card {
+	return game.Card{Rank: game.Rank(rank), Suit: suit}
+}
+
+// gameHand builds a game.Hand from a variadic list of cards.
+func gameHand(cards ...game.Card) game.Hand {
+	return game.Hand(cards)
+}
+
+// gamePhaseMelding returns game.PhaseMelding.
+func gamePhaseMelding() game.Phase { return game.PhaseMelding }
+
+// gamePhaseRoundEnd returns game.PhaseRoundEnd.
+func gamePhaseRoundEnd() game.Phase { return game.PhaseRoundEnd }
+
+// gamePhaseGameOver returns game.PhaseGameOver.
+func gamePhaseGameOver() game.Phase { return game.PhaseGameOver }

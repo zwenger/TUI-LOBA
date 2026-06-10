@@ -58,17 +58,36 @@ type Player struct {
 	PickedUpDiscard *Card
 }
 
+// PlayerRoundResult holds the reveal data for one player at round end.
+// It is captured before hands are cleared so the snapshot can show everyone's
+// remaining cards in the round-summary and game-over screens.
+type PlayerRoundResult struct {
+	PlayerID   string
+	PlayerName string
+	Hand       Hand // cards still held at round end (empty for the round winner)
+	RoundScore int  // penalty for this round (0 for the round winner)
+	TotalScore int  // cumulative total after this round
+}
+
+// RoundResult is captured once per round at the moment endRound fires.
+// It is the authoritative source for the round-summary reveal.
+type RoundResult struct {
+	Round   int
+	Results []PlayerRoundResult
+}
+
 // Game is the authoritative server-side game state.
 type Game struct {
-	Players     []*Player
-	Melds       []Meld
-	Stock       []Card
-	DiscardPile []Card // top of pile is last element
-	Phase       Phase
-	ActiveIndex int // index into Players of whose turn it is
-	Round       int
-	Events      []string // append-only event log (recent lines broadcast to clients)
-	rng         *rand.Rand
+	Players         []*Player
+	Melds           []Meld
+	Stock           []Card
+	DiscardPile     []Card // top of pile is last element
+	Phase           Phase
+	ActiveIndex     int // index into Players of whose turn it is
+	Round           int
+	Events          []string // append-only event log (recent lines broadcast to clients)
+	LastRoundResult *RoundResult // reveal data for the most recently completed round
+	rng             *rand.Rand
 }
 
 // NewGame creates and shuffles a new game for the given player IDs/names.
@@ -463,6 +482,22 @@ func (g *Game) endRound(winner *Player) error {
 		p.RoundScore = p.Hand.Score()
 		p.TotalScore += p.RoundScore
 	}
+
+	// Capture the round reveal AFTER scoring so RoundScore/TotalScore are final,
+	// but while the hands are still intact (startRound clears them later).
+	rr := &RoundResult{Round: g.Round}
+	for _, p := range g.Players {
+		handCopy := make(Hand, len(p.Hand))
+		copy(handCopy, p.Hand)
+		rr.Results = append(rr.Results, PlayerRoundResult{
+			PlayerID:   p.ID,
+			PlayerName: p.Name,
+			Hand:       handCopy,
+			RoundScore: p.RoundScore,
+			TotalScore: p.TotalScore,
+		})
+	}
+	g.LastRoundResult = rr
 
 	// Check if game is over.
 	for _, p := range g.Players {

@@ -85,6 +85,18 @@ type PlayerView struct {
 	IsSelf     bool   `json:"is_self"`
 }
 
+// RevealedPlayerHand holds one player's publicly-revealed hand for the
+// round-summary and game-over screens. Cards are only revealed when the round
+// is over; during normal play other players' hands remain hidden (count only).
+type RevealedPlayerHand struct {
+	PlayerID   string     `json:"player_id"`
+	PlayerName string     `json:"player_name"`
+	Cards      []CardView `json:"cards"`       // full card identities (public at round end)
+	RoundScore int        `json:"round_score"` // penalty sum for this round (0 = round winner)
+	TotalScore int        `json:"total_score"` // cumulative total after this round
+	IsWinner   bool       `json:"is_winner"`   // true for the player who went out
+}
+
 // StateSnapshot is the full personalized game state sent to each client.
 type StateSnapshot struct {
 	Phase       string       `json:"phase"`
@@ -102,6 +114,11 @@ type StateSnapshot struct {
 	// this turn. Non-nil only for the player who picked it up (must play it
 	// before discarding). Other clients receive it as nil.
 	PickedUpDiscard *CardView `json:"picked_up_discard,omitempty"`
+	// RoundReveal is populated only during the round_end and game_over phases.
+	// It contains every player's remaining hand so the penalty sums can be
+	// verified by all players. Nil during normal play to keep other players'
+	// hands hidden.
+	RoundReveal []RevealedPlayerHand `json:"round_reveal,omitempty"`
 }
 
 // Envelope wraps any server→client message.

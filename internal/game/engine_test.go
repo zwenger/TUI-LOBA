@@ -784,3 +784,159 @@ func TestNewGamePlayerCount(t *testing.T) {
 		t.Errorf("unexpected error for 2 players: %v", err)
 	}
 }
+
+// ─── Round-result reveal tests ────────────────────────────────────────────────
+
+// TestRoundResultRevealCapture verifies that LastRoundResult is set at round end
+// with the correct hands and per-player penalties.
+func TestRoundResultRevealCapture(t *testing.T) {
+	players := []struct{ ID, Name string }{
+		{"p1", "Alice"},
+		{"p2", "Bob"},
+	}
+	g, err := NewGame(players, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Rig hands: Alice has one card (she'll discard it and go out),
+	// Bob holds K♠ (10 pts) and 5♣ (5 pts) = 15 total.
+	g.Players[0].Hand = Hand{c(Seven, Hearts)}
+	g.Players[1].Hand = Hand{c(King, Spades), c(Five, Clubs)}
+	g.Phase = PhaseMelding
+
+	if g.LastRoundResult != nil {
+		t.Error("LastRoundResult should be nil before round ends")
+	}
+
+	// Alice discards her last card → round ends.
+	if err := g.Discard("p1", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if g.Phase != PhaseRoundEnd && g.Phase != PhaseGameOver {
+		t.Fatalf("expected round_end or game_over, got %s", g.Phase)
+	}
+	if g.LastRoundResult == nil {
+		t.Fatal("LastRoundResult must be set after round ends")
+	}
+
+	rr := g.LastRoundResult
+
+	// Find Alice's and Bob's results.
+	var aliceResult, bobResult *PlayerRoundResult
+	for i := range rr.Results {
+		switch rr.Results[i].PlayerID {
+		case "p1":
+			aliceResult = &rr.Results[i]
+		case "p2":
+			bobResult = &rr.Results[i]
+		}
+	}
+	if aliceResult == nil || bobResult == nil {
+		t.Fatal("missing player results in LastRoundResult")
+	}
+
+	// Alice went out: empty hand, round score = 0.
+	if len(aliceResult.Hand) != 0 {
+		t.Errorf("Alice's reveal hand = %v, want empty", aliceResult.Hand)
+	}
+	if aliceResult.RoundScore != 0 {
+		t.Errorf("Alice's round score = %d, want 0", aliceResult.RoundScore)
+	}
+
+	// Bob holds K♠ + 5♣ = 10 + 5 = 15.
+	if len(bobResult.Hand) != 2 {
+		t.Errorf("Bob's reveal hand len = %d, want 2", len(bobResult.Hand))
+	}
+	if bobResult.RoundScore != 15 {
+		t.Errorf("Bob's round score = %d, want 15", bobResult.RoundScore)
+	}
+
+	// Verify the exact cards in Bob's reveal hand.
+	hasKing := false
+	hasFive := false
+	for _, card := range bobResult.Hand {
+		if card.Rank == King && card.Suit == Spades {
+			hasKing = true
+		}
+		if card.Rank == Five && card.Suit == Clubs {
+			hasFive = true
+		}
+	}
+	if !hasKing {
+		t.Error("K♠ missing from Bob's reveal hand")
+	}
+	if !hasFive {
+		t.Error("5♣ missing from Bob's reveal hand")
+	}
+}
+
+// TestRoundResultRevealPreservedAfterNextRound verifies that calling NextRound
+// does NOT wipe LastRoundResult (it is only replaced on the next endRound).
+func TestRoundResultRevealPreservedAfterNextRound(t *testing.T) {
+	players := []struct{ ID, Name string }{
+		{"p1", "Alice"},
+		{"p2", "Bob"},
+	}
+	g, err := NewGame(players, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Rig Alice to win round 1.
+	g.Players[0].Hand = Hand{c(Three, Spades)}
+	g.Players[1].Hand = Hand{c(King, Hearts)}
+	g.Phase = PhaseMelding
+
+	_ = g.Discard("p1", 0)
+	if g.LastRoundResult == nil {
+		t.Fatal("LastRoundResult should be set after round 1")
+	}
+	round1Result := g.LastRoundResult
+
+	// Start round 2 (only valid if not game over).
+	if g.Phase == PhaseRoundEnd {
+		if err := g.NextRound(); err != nil {
+			t.Fatalf("NextRound: %v", err)
+		}
+		// LastRoundResult should still point to round 1's result until round 2 ends.
+		if g.LastRoundResult != round1Result {
+			t.Error("LastRoundResult should not change until the next round ends")
+		}
+	}
+}
+
+// TestRoundResultJokerPenalty verifies that a joker left in hand is captured
+// in the reveal with penalty value 25.
+func TestRoundResultJokerPenalty(t *testing.T) {
+	players := []struct{ ID, Name string }{
+		{"p1", "Alice"},
+		{"p2", "Bob"},
+	}
+	g, err := NewGame(players, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g.Players[0].Hand = Hand{c(Two, Spades)}
+	g.Players[1].Hand = Hand{joker(0)}
+	g.Phase = PhaseMelding
+
+	_ = g.Discard("p1", 0) // Alice wins
+
+	rr := g.LastRoundResult
+	if rr == nil {
+		t.Fatal("no LastRoundResult")
+	}
+	for _, pr := range rr.Results {
+		if pr.PlayerID == "p2" {
+			if pr.RoundScore != 25 {
+				t.Errorf("Bob joker penalty = %d, want 25", pr.RoundScore)
+			}
+			if len(pr.Hand) != 1 || !pr.Hand[0].IsJoker() {
+				t.Errorf("Bob's reveal hand should contain 1 joker, got %v", pr.Hand)
+			}
+		}
+	}
+}
