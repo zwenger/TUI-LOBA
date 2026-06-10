@@ -34,7 +34,7 @@ Cada turno tiene cuatro fases, en orden:
 El jugador debe tomar exactamente una carta:
 
 - **Del mazo**: toma la carta de arriba (boca abajo) y la agrega a su mano. No hay restricciones.
-- **Del pozo**: toma la carta visible del tope del pozo, pero **solo si puede usarla inmediatamente** — en una bajada nueva o en una agregada sobre una combinación ya existente en la mesa. La carta tomada del pozo **debe jugarse en ese mismo turno**; no se puede guardar en la mano ni descartar.
+- **Del pozo**: toma la carta visible del tope del pozo, pero **solo si puede usarla inmediatamente** — únicamente si puede formar con ella una **bajada nueva** desde su mano en ese momento (no alcanza con poder agregarla a una combinación ya existente en la mesa). La carta tomada del pozo **debe jugarse en ese mismo turno**; no se puede guardar en la mano ni descartar.
 
 > **Esta implementación**: se aplica estrictamente la restricción de uso inmediato al tomar del pozo.
 

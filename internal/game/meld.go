@@ -423,6 +423,53 @@ func tryEscaleraCombosN(fixed Card, pool, combo []Card, start, pos, need int) bo
 	return false
 }
 
+// pickedCardHasLegalUse reports whether the picked-up discard card can still be
+// legally consumed by any action available to the player right now:
+//  1. Melded into a new pierna or escalera using other cards in hand.
+//  2. Laid off onto an existing table meld — but ONLY if the player has already
+//     melded this round (the same gate LayOff enforces).
+//
+// This is used as a safety valve in Discard to avoid hard-locking a player when
+// the pickup-time validator and the action-time validator disagree.
+func pickedCardHasLegalUse(player *Player, melds []Meld) bool {
+	picked := *player.PickedUpDiscard
+
+	// Build hand without the picked card so the check mirrors CanUsePickedCard.
+	handWithout := make(Hand, 0, len(player.Hand)-1)
+	skipped := false
+	for _, hc := range player.Hand {
+		if !skipped && hc.Equal(picked) {
+			skipped = true
+			continue
+		}
+		handWithout = append(handWithout, hc)
+	}
+
+	// Check 1: can it form a new meld from hand?
+	if CanUsePickedCard(picked, handWithout, melds) {
+		return true
+	}
+
+	// Check 2: can it be laid off onto an existing meld (requires HasMelded)?
+	if player.HasMelded {
+		for i := range melds {
+			m := &melds[i]
+			switch m.Type {
+			case MeldPierna:
+				if CanLayOffPierna(m, picked) == nil {
+					return true
+				}
+			case MeldEscalera:
+				if CanLayOffEscalera(m, picked) == nil {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
 // ─── Lay-off ──────────────────────────────────────────────────────────────────
 
 // CanLayOffPierna checks if a card can be added to an existing pierna.

@@ -410,13 +410,35 @@ func (g *Game) Discard(playerID string, cardIndex int) error {
 
 	// If the player picked up the discard this turn, enforce usage rules.
 	if player.PickedUpDiscard != nil {
-		// Cannot discard the picked-up card itself.
-		if player.Hand[cardIndex].Equal(*player.PickedUpDiscard) {
-			return fmt.Errorf("no podés descartar %s — la tomaste del pozo y debés usarla en una bajada o agregada", player.PickedUpDiscard.String())
-		}
-		// The picked-up card must still be in hand — meaning it wasn't played yet.
-		if player.Hand.FindIndex(*player.PickedUpDiscard) >= 0 {
-			return fmt.Errorf("debés jugar %s (tomada del pozo) en una bajada o agregada antes de terminar tu turno", player.PickedUpDiscard.String())
+		pickedIdx := player.Hand.FindIndex(*player.PickedUpDiscard)
+		if pickedIdx >= 0 {
+			// The picked card is still in hand — it hasn't been played yet.
+			// Safety valve: if no legal action can consume the picked card right now
+			// (validator/state inconsistency or game state changed since pickup),
+			// allow the player to return it to the discard pile rather than hard-locking.
+			if !pickedCardHasLegalUse(player, g.Melds) {
+				// Return the picked card to the discard pile (not the card being discarded).
+				picked := *player.PickedUpDiscard
+				player.Hand.Remove(pickedIdx)
+				g.DiscardPile = append(g.DiscardPile, picked)
+				g.addEvent(fmt.Sprintf("%s devuelve %s al pozo al no poder usarla.", player.Name, picked.String()))
+				player.PickedUpDiscard = nil
+				// The player still needs to discard the card they chose — recalculate
+				// the index since hand shrank by one position.
+				newIdx := player.Hand.FindIndex(card)
+				if newIdx < 0 {
+					// card was the picked card itself (edge case: shouldn't happen here but be safe).
+					g.advanceTurn()
+					return nil
+				}
+				cardIndex = newIdx
+			} else if player.Hand[cardIndex].Equal(*player.PickedUpDiscard) {
+				// Normal rule: cannot directly discard the picked-up card.
+				return fmt.Errorf("no podés descartar %s — la tomaste del pozo y debés usarla en una bajada nueva", player.PickedUpDiscard.String())
+			} else {
+				// Normal rule: must play the picked card first.
+				return fmt.Errorf("debés jugar %s (tomada del pozo) en una bajada antes de terminar tu turno", player.PickedUpDiscard.String())
+			}
 		}
 	}
 

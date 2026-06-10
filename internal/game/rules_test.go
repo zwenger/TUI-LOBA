@@ -595,6 +595,101 @@ func TestDiscardPickupRule(t *testing.T) {
 		}
 	})
 
+	// Regression: Alvaro's deadlock — no-meld player, pierna of same rank on table.
+	// Before 9e73e2e the pickup was accepted because the lay-off path was counted;
+	// after 9e73e2e it must be rejected at draw time.
+	t.Run("regression: no-meld player cannot pick up discard only usable via lay-off", func(t *testing.T) {
+		g := newG()
+		// Pierna of 9s on the table (owned by opponent).
+		g.Melds = []Meld{{
+			Type:    MeldPierna,
+			Cards:   []Card{c(Nine, Hearts), c(Nine, Diamonds), c(Nine, Spades)},
+			OwnerID: "p2",
+		}}
+		// Alvaro's exact hand — no pair of 9s, no escalera run with 9♣.
+		g.Players[0].Hand = Hand{
+			c(Eight, Spades), c(Jack, Spades),
+			c(Four, Hearts),
+			c(Ace, Diamonds), c(Seven, Diamonds), c(Jack, Diamonds), c(King, Diamonds),
+			c(Seven, Clubs), c(King, Clubs),
+		}
+		g.Players[0].HasMelded = false
+		g.DiscardPile = []Card{c(Nine, Clubs)}
+
+		if err := g.DrawDiscard("p1"); err == nil {
+			t.Fatal("expected rejection: no-meld player cannot pick 9♣ when it can only be laid off")
+		}
+		if len(g.DiscardPile) != 1 {
+			t.Fatalf("discard pile should remain unchanged, got %d cards", len(g.DiscardPile))
+		}
+		if g.Players[0].PickedUpDiscard != nil {
+			t.Fatal("PickedUpDiscard should stay nil on rejection")
+		}
+	})
+
+	// Test safety valve: if PickedUpDiscard is set but no legal use exists,
+	// the player must be able to discard (returning the picked card to the pile).
+	t.Run("safety valve: return picked card to pile when no legal use exists", func(t *testing.T) {
+		g := newG()
+		g.Phase = PhaseMelding
+		// Inject inconsistent state directly: PickedUpDiscard is set but the hand
+		// has no meld or lay-off option for 9♣ (no other 9s, no escalera run).
+		picked := c(Nine, Clubs)
+		g.Players[0].Hand = Hand{
+			c(Eight, Spades), c(Jack, Spades),
+			c(Four, Hearts),
+			c(Ace, Diamonds), c(Seven, Diamonds), c(Jack, Diamonds), c(King, Diamonds),
+			c(Seven, Clubs), c(King, Clubs),
+			picked, // in hand
+		}
+		g.Players[0].HasMelded = false
+		g.Players[0].PickedUpDiscard = &picked
+		// No table melds.
+		g.Melds = nil
+
+		initialPileLen := len(g.DiscardPile)
+		// Discard any card that is NOT the picked card.
+		if err := g.Discard("p1", 0); err != nil {
+			t.Fatalf("safety valve should allow discard when picked card has no legal use: %v", err)
+		}
+		// Picked card should have been returned to the discard pile.
+		if g.Players[0].PickedUpDiscard != nil {
+			t.Error("PickedUpDiscard should be nil after safety-valve discard")
+		}
+		// Pile should have grown by 2: picked card returned + discard of chosen card.
+		wantPile := initialPileLen + 2
+		if len(g.DiscardPile) != wantPile {
+			t.Errorf("expected pile length %d, got %d", wantPile, len(g.DiscardPile))
+		}
+	})
+
+	// Ensure that a player who HAS melded can still pick for lay-off (positive case).
+	t.Run("player who has melded can pick discard for lay-off — still rejected at pickup", func(t *testing.T) {
+		// NOTE: per 9e73e2e semantics, DrawDiscard only allows pickup when a NEW meld
+		// can be formed from hand. A player with HasMelded=true must still form a new
+		// meld; they can lay off AFTER picking, but the pickup itself requires a meld.
+		// This test confirms the pickup is rejected even for a melded player when
+		// the card only helps with lay-off, not a new meld.
+		g := newG()
+		g.Melds = []Meld{{
+			Type:    MeldPierna,
+			Cards:   []Card{c(Nine, Hearts), c(Nine, Diamonds), c(Nine, Spades)},
+			OwnerID: "p1",
+		}}
+		g.Players[0].Hand = Hand{
+			c(Eight, Spades), c(Jack, Spades),
+			c(Four, Hearts),
+			c(Ace, Diamonds), c(Seven, Diamonds), c(Jack, Diamonds), c(King, Diamonds),
+			c(Seven, Clubs), c(King, Clubs),
+		}
+		g.Players[0].HasMelded = true // has previously melded
+		g.DiscardPile = []Card{c(Nine, Clubs)}
+
+		if err := g.DrawDiscard("p1"); err == nil {
+			t.Fatal("expected rejection: pickup requires a new meld, not just a lay-off")
+		}
+	})
+
 	t.Run("picked flag cleared on turn advance", func(t *testing.T) {
 		g := newG()
 		g.Players[0].Hand = Hand{
