@@ -27,22 +27,22 @@ type Meld struct {
 // Rules: exactly 3 cards, same rank, all DIFFERENT suits, no jokers.
 func ValidatePierna(cards []Card) error {
 	if len(cards) != 3 {
-		return errors.New("pierna requires exactly 3 cards")
+		return errors.New("una pierna requiere exactamente 3 cartas")
 	}
 	rank := cards[0].Rank
 	if rank == Joker {
-		return errors.New("jokers are not allowed in a pierna")
+		return errors.New("los comodines no están permitidos en una pierna")
 	}
 	suits := make(map[Suit]bool)
 	for _, c := range cards {
 		if c.Rank == Joker {
-			return errors.New("jokers are not allowed in a pierna")
+			return errors.New("los comodines no están permitidos en una pierna")
 		}
 		if c.Rank != rank {
-			return errors.New("all cards in a pierna must share the same rank")
+			return errors.New("todas las cartas de una pierna deben tener el mismo valor")
 		}
 		if suits[c.Suit] {
-			return errors.New("all cards in a pierna must have different suits")
+			return errors.New("todas las cartas de una pierna deben tener palos diferentes")
 		}
 		suits[c.Suit] = true
 	}
@@ -54,7 +54,7 @@ func ValidatePierna(cards []Card) error {
 // high (Q-K-A). No wrap-around. Max 1 joker, fixed to a position.
 func ValidateEscalera(cards []Card) error {
 	if len(cards) < 3 {
-		return errors.New("escalera requires at least 3 cards")
+		return errors.New("una escalera requiere al menos 3 cartas")
 	}
 
 	jokerCount := 0
@@ -64,7 +64,7 @@ func ValidateEscalera(cards []Card) error {
 		}
 	}
 	if jokerCount > 1 {
-		return errors.New("escalera allows at most 1 joker")
+		return errors.New("una escalera admite como máximo 1 comodín")
 	}
 
 	return validateEscaleraSequence(cards)
@@ -74,7 +74,7 @@ func ValidateEscalera(cards []Card) error {
 // lay-off. It verifies suit consistency and consecutiveness.
 func validateEscaleraSequence(cards []Card) error {
 	if len(cards) == 0 {
-		return errors.New("empty escalera")
+		return errors.New("escalera vacía")
 	}
 
 	// Identify the suit from the first non-joker card.
@@ -86,13 +86,13 @@ func validateEscaleraSequence(cards []Card) error {
 		}
 	}
 	if suit == NoSuit {
-		return errors.New("escalera cannot consist entirely of jokers")
+		return errors.New("una escalera no puede consistir únicamente en comodines")
 	}
 
 	// All non-joker cards must share the same suit.
 	for _, c := range cards {
 		if !c.IsJoker() && c.Suit != suit {
-			return errors.New("all non-joker cards in an escalera must share the same suit")
+			return errors.New("todas las cartas de una escalera deben ser del mismo palo")
 		}
 	}
 
@@ -118,6 +118,142 @@ func validateEscaleraSequence(cards []Card) error {
 	return checkConsecutiveWithJoker(ranks, jokerIdx)
 }
 
+// SortEscaleraCards returns a new slice of escalera cards sorted in sequence
+// order (low-to-high), with the joker placed at its represented position.
+// The input must already be validated as a valid escalera (ValidateEscalera ok).
+// Pierna cards are returned as-is (sorted by suit for visual consistency).
+func SortEscaleraCards(cards []Card) []Card {
+	if len(cards) == 0 {
+		return cards
+	}
+
+	// Separate joker from non-jokers.
+	var jokerCard *Card
+	nonJokers := make([]Card, 0, len(cards))
+	for i := range cards {
+		if cards[i].IsJoker() {
+			jokerCard = &cards[i]
+		} else {
+			nonJokers = append(nonJokers, cards[i])
+		}
+	}
+
+	if jokerCard == nil {
+		// No joker: sort non-jokers by rank (ace-low by default; handle ace-high).
+		return sortNonJokers(nonJokers)
+	}
+
+	// Sort non-jokers first.
+	sorted := sortNonJokers(nonJokers)
+
+	// Find where the joker belongs: it must fill the one gap.
+	// Determine ace-high context.
+	aceHigh := false
+	for _, c := range sorted {
+		if c.Rank == King {
+			aceHigh = true
+			break
+		}
+	}
+
+	ranks := make([]int, len(sorted))
+	for i, c := range sorted {
+		ranks[i] = int(c.Rank)
+		if aceHigh && ranks[i] == 1 {
+			ranks[i] = 14
+		}
+	}
+
+	// Find the joker's position in the sorted rank list.
+	result := make([]Card, 0, len(cards))
+	placed := false
+	for i := range ranks {
+		if !placed && i > 0 && ranks[i]-ranks[i-1] == 2 {
+			// Internal gap: joker goes between i-1 and i.
+			result = append(result, *jokerCard)
+			placed = true
+		}
+		result = append(result, sorted[i])
+	}
+	if !placed {
+		// Joker extends an end. Determine which end.
+		lowRank := ranks[0]
+		highRank := ranks[len(ranks)-1]
+		// canGoLow: joker represents lowRank-1 (must be ≥ 1)
+		canGoLow := lowRank > 1
+		// canGoHigh: joker represents highRank+1 (must be ≤ 13, or 14 for ace-high)
+		maxHigh := 13
+		if aceHigh {
+			maxHigh = 14
+		}
+		canGoHigh := highRank < maxHigh
+
+		switch {
+		case canGoLow && !canGoHigh:
+			// Only low end is possible (high already at King/Ace-high boundary).
+			result = append([]Card{*jokerCard}, result...)
+		case !canGoLow && canGoHigh:
+			// Only high end is possible (low already at Ace, can't go below).
+			result = append(result, *jokerCard)
+		case aceHigh && highRank == 13:
+			// High end: joker represents Ace-high (rank 14) in a run ending at King.
+			result = append(result, *jokerCard)
+		case highRank+1 == 13:
+			// High end: joker represents King — a natural boundary card.
+			// Covers J-Q-Joker and similar runs ending just before King.
+			result = append(result, *jokerCard)
+		default:
+			// Both ends possible, no special boundary: place at low end.
+			result = append([]Card{*jokerCard}, result...)
+		}
+	}
+
+	return result
+}
+
+// sortNonJokers sorts cards by rank (ace-low by default; ace treated as 14 when
+// a King is present in the set).
+func sortNonJokers(cards []Card) []Card {
+	if len(cards) == 0 {
+		return cards
+	}
+	result := make([]Card, len(cards))
+	copy(result, cards)
+
+	// Check for ace-high context.
+	aceHigh := false
+	for _, c := range result {
+		if c.Rank == King {
+			aceHigh = true
+			break
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		ri, rj := int(result[i].Rank), int(result[j].Rank)
+		if aceHigh {
+			if ri == 1 {
+				ri = 14
+			}
+			if rj == 1 {
+				rj = 14
+			}
+		}
+		return ri < rj
+	})
+	return result
+}
+
+// SortPiernaCards returns a new slice of pierna cards sorted by suit.
+func SortPiernaCards(cards []Card) []Card {
+	result := make([]Card, len(cards))
+	copy(result, cards)
+	sort.Slice(result, func(i, j int) bool {
+		return int(result[i].Suit) < int(result[j].Suit)
+	})
+	return result
+}
+
 // checkConsecutive verifies that a sorted list of ranks is consecutive.
 // If tryAceHigh is true, Ace (1) is treated as 14.
 func checkConsecutive(ranks []int, tryAceHigh bool) error {
@@ -137,7 +273,7 @@ func checkConsecutive(ranks []int, tryAceHigh bool) error {
 			if !tryAceHigh {
 				return checkConsecutive(ranks, true)
 			}
-			return errors.New("escalera cards are not consecutive")
+			return errors.New("las cartas de la escalera no son consecutivas")
 		}
 	}
 	return nil
@@ -171,7 +307,7 @@ func checkConsecutiveWithJoker(ranks []int, jokerIdx int) error {
 			return nil
 		}
 	}
-	return errors.New("joker cannot complete a consecutive run in this escalera")
+	return errors.New("el comodín no puede completar una secuencia válida en esta escalera")
 }
 
 // fillJokerGap returns true if exactly one gap of exactly 1 exists in the sorted list,
@@ -318,21 +454,21 @@ func tryEscaleraCombosN(fixed Card, pool, combo []Card, start, pos, need int) bo
 // After creation, any card of the same rank may be added regardless of suit.
 func CanLayOffPierna(meld *Meld, card Card) error {
 	if meld.Type != MeldPierna {
-		return errors.New("meld is not a pierna")
+		return errors.New("la combinación no es una pierna")
 	}
 	if card.IsJoker() {
-		return errors.New("jokers cannot be added to a pierna")
+		return errors.New("los comodines no se pueden agregar a una pierna")
 	}
 	if len(meld.Cards) == 0 {
-		return errors.New("empty pierna")
+		return errors.New("pierna vacía")
 	}
 	existing := meld.Cards[0].Rank
 	if card.Rank != existing {
-		return errors.New("card rank does not match this pierna")
+		return errors.New("el valor de la carta no coincide con esta pierna")
 	}
 	// Limit: max 8 cards (two decks, 4 suits × 2)
 	if len(meld.Cards) >= 8 {
-		return errors.New("pierna is full")
+		return errors.New("la pierna está completa")
 	}
 	return nil
 }
@@ -342,7 +478,7 @@ func CanLayOffPierna(meld *Meld, card Card) error {
 // the escalera has no joker yet.
 func CanLayOffEscalera(meld *Meld, card Card) error {
 	if meld.Type != MeldEscalera {
-		return errors.New("meld is not an escalera")
+		return errors.New("la combinación no es una escalera")
 	}
 
 	// Build trial cards at low end and high end.
@@ -355,7 +491,7 @@ func CanLayOffEscalera(meld *Meld, card Card) error {
 	if validateEscaleraSequence(highTrial) == nil {
 		return nil
 	}
-	return errors.New("card cannot extend this escalera")
+	return errors.New("la carta no puede extender esta escalera")
 }
 
 // LayOffEscalera adds a card to the correct end of an escalera in-place.

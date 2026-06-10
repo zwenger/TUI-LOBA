@@ -75,7 +75,7 @@ type Game struct {
 // Callers must provide 2–6 players.
 func NewGame(players []struct{ ID, Name string }, seed int64) (*Game, error) {
 	if len(players) < 2 || len(players) > 6 {
-		return nil, errors.New("loba requires 2 to 6 players")
+		return nil, errors.New("loba requiere entre 2 y 6 jugadores")
 	}
 
 	g := &Game{
@@ -125,7 +125,7 @@ func (g *Game) startRound() {
 	g.Stock = deck[cursor:]
 
 	g.Phase = PhaseDrawing
-	g.addEvent(fmt.Sprintf("Round %d started. %s goes first.", g.Round, g.activePlayer().Name))
+	g.addEvent(fmt.Sprintf("Ronda %d iniciada. %s comienza.", g.Round, g.activePlayer().Name))
 }
 
 // ─── Accessors ────────────────────────────────────────────────────────────────
@@ -172,7 +172,7 @@ func (g *Game) DrawStock(playerID string) error {
 	g.Stock = g.Stock[:len(g.Stock)-1]
 	g.activePlayer().Hand.Add(card)
 	g.Phase = PhaseMelding
-	g.addEvent(fmt.Sprintf("%s drew from stock.", g.activePlayer().Name))
+	g.addEvent(fmt.Sprintf("%s robó del mazo.", g.activePlayer().Name))
 	return nil
 }
 
@@ -184,13 +184,13 @@ func (g *Game) DrawDiscard(playerID string) error {
 		return err
 	}
 	if len(g.DiscardPile) == 0 {
-		return errors.New("discard pile is empty")
+		return errors.New("el pozo está vacío")
 	}
 	card := g.DiscardPile[len(g.DiscardPile)-1]
 
 	// Validate: card must be usable in a meld or lay-off this turn.
 	if !CanUsePickedCard(card, g.activePlayer().Hand, g.Melds) {
-		return fmt.Errorf("you can only take the discard if you can use %s in a meld or lay-off this turn", card.String())
+		return fmt.Errorf("solo se puede tomar del pozo si la carta %s se puede usar en una bajada o agregada en este turno", card.String())
 	}
 
 	g.DiscardPile = g.DiscardPile[:len(g.DiscardPile)-1]
@@ -200,7 +200,7 @@ func (g *Game) DrawDiscard(playerID string) error {
 	cardCopy := card
 	p.PickedUpDiscard = &cardCopy
 	g.Phase = PhaseMelding
-	g.addEvent(fmt.Sprintf("%s took the discard (%s).", p.Name, card.String()))
+	g.addEvent(fmt.Sprintf("%s tomó del pozo (%s).", p.Name, card.String()))
 	return nil
 }
 
@@ -224,12 +224,20 @@ func (g *Game) Meld(playerID string, cardIndexes []int, meldType MeldType) error
 	case MeldEscalera:
 		validateErr = ValidateEscalera(cards)
 	default:
-		return errors.New("unknown meld type")
+		return errors.New("tipo de combinación desconocido")
 	}
 	if validateErr != nil {
 		// Return cards to hand.
 		player.Hand = append(player.Hand, cards...)
 		return validateErr
+	}
+
+	// Sort cards into visual/sequence order before storing.
+	switch meldType {
+	case MeldEscalera:
+		cards = SortEscaleraCards(cards)
+	case MeldPierna:
+		cards = SortPiernaCards(cards)
 	}
 
 	meld := Meld{Type: meldType, Cards: cards, OwnerID: playerID}
@@ -244,7 +252,7 @@ func (g *Game) Meld(playerID string, cardIndexes []int, meldType MeldType) error
 			}
 		}
 	}
-	g.addEvent(fmt.Sprintf("%s melded %s.", player.Name, describeCards(cards)))
+	g.addEvent(fmt.Sprintf("%s bajó %s.", player.Name, describeCards(cards)))
 
 	if len(player.Hand) == 0 {
 		return g.endRound(player)
@@ -259,13 +267,13 @@ func (g *Game) LayOff(playerID string, cardIndexes []int, meldIndex int) error {
 	}
 	player := g.activePlayer()
 	if !player.HasMelded {
-		return errors.New("you must meld at least once before laying off")
+		return errors.New("debés bajar al menos una combinación antes de agregar cartas")
 	}
 	if meldIndex < 0 || meldIndex >= len(g.Melds) {
-		return errors.New("invalid meld index")
+		return errors.New("índice de combinación inválido")
 	}
 	if len(cardIndexes) != 1 {
-		return errors.New("lay off exactly one card at a time")
+		return errors.New("solo se puede agregar una carta a la vez")
 	}
 
 	cards, err := g.extractCards(player, cardIndexes)
@@ -297,7 +305,7 @@ func (g *Game) LayOff(playerID string, cardIndexes []int, meldIndex int) error {
 	if player.PickedUpDiscard != nil && card.Equal(*player.PickedUpDiscard) {
 		player.PickedUpDiscard = nil
 	}
-	g.addEvent(fmt.Sprintf("%s laid off %s on meld #%d.", player.Name, card.String(), meldIndex+1))
+	g.addEvent(fmt.Sprintf("%s agregó %s a la combinación #%d.", player.Name, card.String(), meldIndex+1))
 
 	if len(player.Hand) == 0 {
 		return g.endRound(player)
@@ -312,24 +320,41 @@ func (g *Game) Discard(playerID string, cardIndex int) error {
 	}
 	player := g.activePlayer()
 	if cardIndex < 0 || cardIndex >= len(player.Hand) {
-		return errors.New("invalid card index")
+		return errors.New("índice de carta inválido")
+	}
+
+	card := player.Hand[cardIndex]
+
+	// Joker discard rule: a joker cannot be discarded, UNLESS it is the only card
+	// remaining in hand (forced discard with no other option).
+	if card.IsJoker() {
+		allJokers := true
+		for _, c := range player.Hand {
+			if !c.IsJoker() {
+				allJokers = false
+				break
+			}
+		}
+		if !allJokers {
+			return errors.New("no se puede descartar un comodín")
+		}
 	}
 
 	// If the player picked up the discard this turn, enforce usage rules.
 	if player.PickedUpDiscard != nil {
 		// Cannot discard the picked-up card itself.
 		if player.Hand[cardIndex].Equal(*player.PickedUpDiscard) {
-			return fmt.Errorf("you cannot discard %s — it was picked up from the discard pile and must be played in a meld or lay-off", player.PickedUpDiscard.String())
+			return fmt.Errorf("no podés descartar %s — la tomaste del pozo y debés usarla en una bajada o agregada", player.PickedUpDiscard.String())
 		}
 		// The picked-up card must still be in hand — meaning it wasn't played yet.
 		if player.Hand.FindIndex(*player.PickedUpDiscard) >= 0 {
-			return fmt.Errorf("you must play %s (picked from the discard) in a meld or lay-off before ending your turn", player.PickedUpDiscard.String())
+			return fmt.Errorf("debés jugar %s (tomada del pozo) en una bajada o agregada antes de terminar tu turno", player.PickedUpDiscard.String())
 		}
 	}
 
-	card := player.Hand.Remove(cardIndex)
+	player.Hand.Remove(cardIndex)
 	g.DiscardPile = append(g.DiscardPile, card)
-	g.addEvent(fmt.Sprintf("%s discarded %s.", player.Name, card.String()))
+	g.addEvent(fmt.Sprintf("%s descartó %s.", player.Name, card.String()))
 
 	if len(player.Hand) == 0 {
 		return g.endRound(player)
@@ -363,7 +388,7 @@ func (g *Game) AutoPlayDisconnected() error {
 	if g.Phase == PhaseMelding && len(p.Hand) > 0 {
 		card := p.Hand.Remove(len(p.Hand) - 1)
 		g.DiscardPile = append(g.DiscardPile, card)
-		g.addEvent(fmt.Sprintf("%s (disconnected) was skipped.", p.Name))
+		g.addEvent(fmt.Sprintf("%s (desconectado) fue salteado.", p.Name))
 		g.advanceTurn()
 	}
 	return nil
@@ -373,13 +398,13 @@ func (g *Game) AutoPlayDisconnected() error {
 
 func (g *Game) checkTurn(playerID string, phase Phase) error {
 	if g.Phase == PhaseRoundEnd || g.Phase == PhaseGameOver {
-		return errors.New("game is not in a playable phase")
+		return errors.New("el juego no está en una fase jugable")
 	}
 	if g.activePlayer().ID != playerID {
-		return errors.New("it is not your turn")
+		return errors.New("no es tu turno")
 	}
 	if g.Phase != phase {
-		return fmt.Errorf("expected phase %s, current phase is %s", phase, g.Phase)
+		return fmt.Errorf("fase esperada %s, fase actual %s", phase, g.Phase)
 	}
 	return nil
 }
@@ -392,10 +417,10 @@ func (g *Game) extractCards(player *Player, indexes []int) ([]Card, error) {
 	seen := make(map[int]bool)
 	for _, i := range indexes {
 		if i < 0 || i >= len(player.Hand) {
-			return nil, fmt.Errorf("card index %d out of range", i)
+			return nil, fmt.Errorf("índice de carta %d fuera de rango", i)
 		}
 		if seen[i] {
-			return nil, fmt.Errorf("duplicate card index %d", i)
+			return nil, fmt.Errorf("índice de carta duplicado %d", i)
 		}
 		seen[i] = true
 	}
@@ -418,13 +443,13 @@ func (g *Game) advanceTurn() {
 	next := (g.ActiveIndex + 1) % len(g.Players)
 	g.ActiveIndex = next
 	g.Phase = PhaseDrawing
-	g.addEvent(fmt.Sprintf("It is now %s's turn.", g.activePlayer().Name))
+	g.addEvent(fmt.Sprintf("Es el turno de %s.", g.activePlayer().Name))
 }
 
 func (g *Game) endRound(winner *Player) error {
 	winner.PickedUpDiscard = nil
 	g.Phase = PhaseRoundEnd
-	g.addEvent(fmt.Sprintf("%s went out! Round %d over.", winner.Name, g.Round))
+	g.addEvent(fmt.Sprintf("¡%s se fue! Ronda %d terminada.", winner.Name, g.Round))
 
 	// Score remaining hands.
 	for _, p := range g.Players {
@@ -445,10 +470,10 @@ func (g *Game) endRound(winner *Player) error {
 // NextRound advances to the next round. May only be called when Phase == PhaseRoundEnd.
 func (g *Game) NextRound() error {
 	if g.Phase != PhaseRoundEnd {
-		return errors.New("round has not ended")
+		return errors.New("la ronda no ha terminado")
 	}
 	if g.Phase == PhaseGameOver {
-		return errors.New("game is over")
+		return errors.New("el juego ha terminado")
 	}
 
 	// Check again — might have been set by endRound.
@@ -480,14 +505,14 @@ func (g *Game) Winner() *Player {
 
 func (g *Game) reshuffleDiscard() error {
 	if len(g.DiscardPile) <= 1 {
-		return errors.New("not enough cards to reshuffle")
+		return errors.New("no hay suficientes cartas para reiniciar el mazo")
 	}
 	top := g.DiscardPile[len(g.DiscardPile)-1]
 	pile := g.DiscardPile[:len(g.DiscardPile)-1]
 	shuffle(pile, g.rng)
 	g.Stock = pile
 	g.DiscardPile = []Card{top}
-	g.addEvent("Stock exhausted — discard pile reshuffled.")
+	g.addEvent("Mazo agotado — el pozo fue mezclado y reiniciado.")
 	return nil
 }
 

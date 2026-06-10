@@ -1,0 +1,154 @@
+# Reglas de la Loba (Loba de Menos)
+
+Juego de cartas rioplatense de la familia del rummy. Esta variante es la **Loba de Menos**: gana quien acumule menos puntos de penalización.
+
+---
+
+## Objetivo
+
+Deshacerse de todas las cartas de la mano formando combinaciones válidas (bajadas) en la mesa. Cuando un jugador agota su mano, la ronda termina. Los demás reciben puntos de penalización por las cartas que les quedan. Gana quien tenga el **menor puntaje acumulado** cuando algún jugador supera el límite.
+
+---
+
+## Mazos y cartas
+
+- **2 mazos** estándar de 52 cartas (104 cartas) más **4 comodines** = **108 cartas en total**.
+- Los comodines son salvajes: reemplazan cualquier carta en una escalera.
+
+---
+
+## Reparto
+
+- Se reparten **9 cartas** a cada jugador (en sentido horario).
+- La siguiente carta se coloca boca arriba para iniciar el **pozo** (pila de descarte).
+- El resto forma el **mazo** (pila boca abajo).
+
+---
+
+## Turno
+
+Cada turno tiene cuatro fases, en orden:
+
+### 1. Robar
+
+El jugador debe tomar exactamente una carta:
+
+- **Del mazo**: toma la carta de arriba (boca abajo) y la agrega a su mano. No hay restricciones.
+- **Del pozo**: toma la carta visible del tope del pozo, pero **solo si puede usarla inmediatamente** — en una bajada nueva o en una agregada sobre una combinación ya existente en la mesa. La carta tomada del pozo **debe jugarse en ese mismo turno**; no se puede guardar en la mano ni descartar.
+
+> **Esta implementación**: se aplica estrictamente la restricción de uso inmediato al tomar del pozo.
+
+### 2. Bajar (opcional)
+
+El jugador puede bajar una o más combinaciones válidas de su mano a la mesa.
+
+### 3. Agregar (opcional)
+
+Si el jugador **ya bajó al menos una combinación** en esta o en rondas anteriores durante este turno, puede agregar cartas de su mano a cualquier combinación en la mesa (propia o ajena), de a una carta por vez.
+
+### 4. Descartar
+
+El jugador descarta una carta boca arriba al pozo para terminar su turno.
+
+- **No se puede descartar un comodín** mientras haya otra carta en la mano. El comodín debe jugarse en una combinación. Excepción: si la mano consiste únicamente en comodines (situación muy rara), se permite descartarlo para terminar el turno.
+
+---
+
+## Combinaciones válidas
+
+### Pierna
+
+Tres cartas del **mismo valor** en **palos diferentes**.
+
+- Al momento de la creación: exactamente 3 cartas, todos los palos deben ser distintos entre sí, sin comodines.
+- **No se admiten comodines** en ninguna posición de la pierna (ni al crearla ni al agregar).
+- Después de bajarla, se pueden agregar más cartas del mismo valor (cualquier palo, incluyendo duplicados de palo, dado que hay dos mazos).
+- Máximo 8 cartas por pierna (4 palos × 2 mazos).
+
+Ejemplos válidos: `7♠ 7♥ 7♦` | `K♣ K♠ K♦` | `A♠ A♥ A♣`
+
+### Escalera
+
+Tres o más cartas del **mismo palo** en **secuencia consecutiva de valores**.
+
+- El as puede ser **bajo** (A-2-3) o **alto** (Q-K-A), pero **no puede ser simultáneamente alto y bajo** en la misma escalera (no se permite K-A-2).
+- Se admite **como máximo 1 comodín** por escalera.
+- El comodín ocupa una posición fija dentro de la secuencia; **no puede moverse** una vez bajado (ver sección Comodines).
+
+Ejemplos válidos: `5♣ 6♣ 7♣` | `A♦ 2♦ 3♦` | `Q♥ K♥ A♥` | `5♠ ★JKR 7♠`
+
+---
+
+## Comodines
+
+- Solo se permiten en **escaleras**, nunca en piernas.
+- **Máximo 1 comodín** por escalera.
+- Al guardar una escalera, el comodín queda fijado en la posición de la secuencia que ocupa y **no se puede desplazar ni canjear**.
+- **No se puede descartar un comodín** salvo que sea la única carta que queda en la mano (ver sección Descartar).
+
+> **Variante conocida**: algunas versiones permiten hasta 2 comodines por escalera, o permiten canjear el comodín por la carta real que representa. **Esta implementación** no soporta ninguna de las dos variantes: máximo 1 comodín, sin canje.
+
+> **Variante conocida**: algunas versiones permiten mover el comodín de un extremo al otro de la escalera al agregar. **Esta implementación** no soporta el movimiento del comodín una vez bajado.
+
+---
+
+## Cierre de la mano
+
+La ronda termina cuando un jugador logra **agotar su mano** por completo (ya sea mediante una bajada o un descarte). En ese momento se puntúan las manos restantes.
+
+---
+
+## Puntuación
+
+Los jugadores con cartas en la mano al cierre reciben puntos de penalización:
+
+| Carta          | Puntos de penalización |
+|----------------|------------------------|
+| Comodín        | 25                     |
+| As             | 15                     |
+| J, Q, K, 10    | 10                     |
+| 2 a 9          | valor nominal          |
+
+El jugador que cierra recibe **0 puntos** en esa ronda.
+
+> **Nota de variantes**: otras fuentes asignan 10 puntos al As. **Esta implementación** usa 15 puntos para el As y 25 para el comodín, acorde al sistema más extendido en Argentina.
+
+---
+
+## Fin de la partida
+
+- Cuando el puntaje acumulado de **algún jugador supera los 101 puntos**, la partida termina al finalizar esa ronda.
+- El jugador con el **menor puntaje total** gana.
+- En caso de empate, ganan todos los jugadores empatados.
+
+> **Esta implementación**: límite en 101 puntos (superarlo desencadena el fin), sin reenganche.
+
+> **Variante conocida**: algunas versiones permiten hasta dos "reenganches" (el jugador eliminado paga una penalización y vuelve). **Esta implementación** no soporta reenganches.
+
+---
+
+## Resumen de decisiones de implementación
+
+| Regla | Decisión adoptada |
+|---|---|
+| Mazos | 2 mazos + 4 comodines (108 cartas) |
+| Cartas repartidas | 9 por jugador |
+| Tomar del pozo | Solo si se usa en ese turno |
+| Pierna | Exactamente 3 cartas al crear, sin comodines |
+| Comodín en pierna | No permitido |
+| Comodines por escalera | Máximo 1 |
+| Movimiento de comodín | No soportado |
+| Canje de comodín | No soportado |
+| Descartar comodín | Prohibido (excepción: única carta en mano) |
+| Puntuación del As | 15 puntos |
+| Puntuación del comodín | 25 puntos |
+| Límite de puntos | 101 (superarlo termina el juego) |
+| Reenganches | No soportados |
+
+---
+
+## Fuentes
+
+- [Pagat.com — Rules of Card Games: Loba](https://www.pagat.com/rummy/loba.html)
+- [The Rummy Rulebook — Loba de Menos](https://www.rummyrulebook.com/pages/loba-de-menos/)
+- [CardRules+ — Cómo jugar a Loba](https://cardrulesplus.com/games/loba/)

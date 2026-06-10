@@ -264,7 +264,7 @@ func (m Model) handleNameKey(key string) (tea.Model, tea.Cmd) {
 	case "enter":
 		name := strings.TrimSpace(m.nameInput)
 		if name == "" {
-			m.nameErr = "Name cannot be empty."
+			m.nameErr = "El nombre no puede estar vacío."
 			return m, nil
 		}
 		m.name = name
@@ -359,15 +359,24 @@ func (m Model) handleGameKey(key string) (tea.Model, tea.Cmd) {
 			m.selected = make(map[int]bool)
 		}
 	case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
-		// Lay off cursor card onto meld #N.
-		if isMyTurn && m.conn != nil && len(m.selected) > 0 {
-			idx := int(key[0] - '0')
-			_ = protocol.WriteJSON(m.conn, protocol.Command{
-				Type:        protocol.CmdLayOff,
-				CardIndexes: m.serverIndexes(selectedSlice(m.selected)),
-				MeldIndex:   idx,
-			})
-			m.selected = make(map[int]bool)
+		// Lay off selected card(s) onto meld displayed as #N (1-based).
+		// Digit "0" is not a valid meld label.
+		if isMyTurn && len(m.selected) > 0 {
+			displayNum := int(key[0] - '0')
+			if displayNum == 0 {
+				m.lastError = "Ingresá el número de combinación (1, 2, …)"
+				break
+			}
+			// Translate 1-based display number to 0-based server index.
+			serverMeldIdx := displayNum - 1
+			if m.conn != nil {
+				_ = protocol.WriteJSON(m.conn, protocol.Command{
+					Type:        protocol.CmdLayOff,
+					CardIndexes: m.serverIndexes(selectedSlice(m.selected)),
+					MeldIndex:   serverMeldIdx,
+				})
+				m.selected = make(map[int]bool)
+			}
 		}
 	case "s":
 		// Cycle sort mode: dealt → rank → suit → dealt.
@@ -423,7 +432,7 @@ func (m Model) View() string {
 }
 
 func header() string {
-	return styleHeader.Render("▄▀ L O B A ▀▄  ◈  Argentine Rummy") + "\n"
+	return styleHeader.Render("▄▀ L O B A ▀▄  ◈  Rummy Argentino") + "\n"
 }
 
 // ─── Name entry view ──────────────────────────────────────────────────────────
@@ -433,9 +442,9 @@ func (m Model) viewNameEntry() string {
 	b.WriteString(header())
 	b.WriteString("\n")
 	b.WriteString(styleBox.Render(
-		"Enter your name:\n\n" +
+		"Ingresá tu nombre:\n\n" +
 			styleInput.Render(m.nameInput+"█") + "\n\n" +
-			styleHelp.Render("Press Enter to confirm"),
+			styleHelp.Render("Presioná Enter para confirmar"),
 	))
 	if m.nameErr != "" {
 		b.WriteString("\n" + styleErr.Render(m.nameErr))
@@ -458,23 +467,23 @@ func (m Model) viewLobby() string {
 	// Public address banner (shown to all clients when the host used --public).
 	if m.publicAddr != "" {
 		banner := stylePublicAddr.Render(
-			"ROOM ADDRESS: " + m.publicAddr + " — share this with your friends",
+			"DIRECCIÓN DE LA SALA: " + m.publicAddr + " — compartila con tus amigos",
 		)
 		b.WriteString(banner + "\n\n")
 	}
 
 	players := strings.Join(m.lobbyPlayers, "\n  ")
-	content := fmt.Sprintf("  Players joined (%d/6):\n  %s\n\n  %s",
+	content := fmt.Sprintf("  Jugadores conectados (%d/6):\n  %s\n\n  %s",
 		len(m.lobbyPlayers),
 		players,
-		styleHelp.Render("Host: press S or Enter to start"),
+		styleHelp.Render("Anfitrión: presioná S o Enter para comenzar"),
 	)
 	b.WriteString(styleBox.Render(content))
 
 	if m.lastError != "" {
 		b.WriteString("\n" + styleErr.Render(m.lastError))
 	}
-	b.WriteString("\n\n" + styleHelp.Render("Waiting for host to start the game..."))
+	b.WriteString("\n\n" + styleHelp.Render("Esperando que el anfitrión inicie la partida..."))
 	return b.String()
 }
 
@@ -482,7 +491,7 @@ func (m Model) viewLobby() string {
 
 func (m Model) viewGame() string {
 	if m.state == nil {
-		return header() + "\nConnecting..."
+		return header() + "\nConectando..."
 	}
 	s := m.state
 
@@ -530,22 +539,22 @@ func (m Model) renderOpponents(s *protocol.StateSnapshot) string {
 		if p.IsActive {
 			turn = styleActive.Render(" ◄")
 		}
-		line := fmt.Sprintf("%s%s  (%d cards)  score:%d",
+		line := fmt.Sprintf("%s%s  (%d cartas)  puntaje:%d",
 			p.Name, turn, p.CardCount, p.TotalScore)
 		if !p.Connected {
-			line += styleDim.Render(" [off]")
+			line += styleDim.Render(" [desc]")
 		}
 		parts = append(parts, line)
 	}
 	if len(parts) == 0 {
-		return styleDim.Render("No opponents") + "\n"
+		return styleDim.Render("Sin oponentes") + "\n"
 	}
 	return strings.Join(parts, "   ") + "\n"
 }
 
 func (m Model) renderMelds(s *protocol.StateSnapshot) string {
 	if len(s.Melds) == 0 {
-		return styleDim.Render("  (no melds on table yet)") + "\n"
+		return styleDim.Render("  (no hay combinaciones en la mesa todavía)") + "\n"
 	}
 
 	termWidth := m.width
@@ -588,7 +597,7 @@ func (m Model) renderMelds(s *protocol.StateSnapshot) string {
 
 func (m Model) renderHand(s *protocol.StateSnapshot) string {
 	if len(s.Hand) == 0 {
-		return styleDim.Render("Your hand is empty.") + "\n"
+		return styleDim.Render("Tu mano está vacía.") + "\n"
 	}
 
 	// Self info.
@@ -604,9 +613,9 @@ func (m Model) renderHand(s *protocol.StateSnapshot) string {
 	isMyTurn := s.ActiveID == m.selfID
 	turnMark := ""
 	if isMyTurn {
-		turnMark = styleActive.Render(" ◄ YOUR TURN")
+		turnMark = styleActive.Render(" ◄ TU TURNO")
 	}
-	handHeader := fmt.Sprintf("Your hand — %s%s  (score: %s)", selfName, turnMark, selfScore)
+	handHeader := fmt.Sprintf("Tu mano — %s%s  (puntaje: %s)", selfName, turnMark, selfScore)
 
 	// Build sorted display order.
 	displayHand := make([]protocol.CardView, len(s.Hand))
@@ -650,10 +659,10 @@ func (m Model) renderHelp(isMyTurn bool) string {
 	sortLabel := styleDim.Render("[S: " + m.sortMode.String() + "]")
 	pickedNote := ""
 	if m.state != nil && m.state.PickedUpDiscard != nil {
-		pickedNote = stylePickedUp.Render("  [★ must play " + m.state.PickedUpDiscard.Label + " before discarding]")
+		pickedNote = stylePickedUp.Render("  [★ debés jugar " + m.state.PickedUpDiscard.Label + " antes de descartar]")
 	}
 	if !isMyTurn {
-		return styleHelp.Render("← →/h l: move cursor  Space: select  S: cycle sort  (waiting)") + " " + sortLabel + pickedNote + "\n"
+		return styleHelp.Render("← →/h l: mover cursor  Espacio: seleccionar  S: ordenar  (esperando)") + " " + sortLabel + pickedNote + "\n"
 	}
 	phase := ""
 	if m.state != nil {
@@ -661,9 +670,9 @@ func (m Model) renderHelp(isMyTurn bool) string {
 	}
 	switch phase {
 	case "draw":
-		return styleHelp.Render("D: draw stock  T: take discard  S: cycle sort") + " " + sortLabel + "\n"
+		return styleHelp.Render("D: robar del mazo  T: tomar del pozo  S: ordenar") + " " + sortLabel + "\n"
 	default:
-		return styleHelp.Render("Space: select  M: pierna  E: escalera  0-9: lay off#N  X: discard  S: sort  Esc: clear") + " " + sortLabel + pickedNote + "\n"
+		return styleHelp.Render("Espacio: seleccionar  M: pierna  E: escalera  1-9: agregar en comb.#N  X: descartar  S: ordenar  Esc: limpiar") + " " + sortLabel + pickedNote + "\n"
 	}
 }
 
@@ -672,20 +681,20 @@ func (m Model) renderHelp(isMyTurn bool) string {
 func (m Model) viewRoundSummary() string {
 	var b strings.Builder
 	b.WriteString(header())
-	b.WriteString(styleTitle.Render(fmt.Sprintf("Round %d — End", m.state.Round)) + "\n\n")
+	b.WriteString(styleTitle.Render(fmt.Sprintf("Ronda %d — Fin", m.state.Round)) + "\n\n")
 
 	if m.state != nil {
 		for _, p := range m.state.Players {
-			line := fmt.Sprintf("  %-20s  this round: +%d   total: %d",
+			line := fmt.Sprintf("  %-20s  esta ronda: +%d   total: %d",
 				p.Name, p.RoundScore, p.TotalScore)
 			if p.TotalScore > 101 {
-				line += styleErr.Render("  ELIMINATED")
+				line += styleErr.Render("  ELIMINADO")
 			}
 			b.WriteString(line + "\n")
 		}
 	}
 
-	b.WriteString("\n" + styleHelp.Render("Press Enter / N for next round  ·  Q to quit"))
+	b.WriteString("\n" + styleHelp.Render("Enter / N: siguiente ronda  ·  Q: salir"))
 	return b.String()
 }
 
@@ -699,7 +708,7 @@ func (m Model) viewGameOver() string {
 	if m.state != nil {
 		winner = m.state.WinnerName
 	}
-	b.WriteString(styleWinner.Render(fmt.Sprintf("🏆  WINNER: %s", winner)) + "\n\n")
+	b.WriteString(styleWinner.Render(fmt.Sprintf("🏆  GANADOR: %s", winner)) + "\n\n")
 
 	if m.state != nil {
 		for _, p := range m.state.Players {
@@ -708,7 +717,7 @@ func (m Model) viewGameOver() string {
 		}
 	}
 
-	b.WriteString("\n" + styleHelp.Render("Press Q to quit"))
+	b.WriteString("\n" + styleHelp.Render("Q: salir"))
 	return b.String()
 }
 
@@ -848,18 +857,18 @@ func renderPiles(s *protocol.StateSnapshot) string {
 	var discardBlock string
 	if s.DiscardTop != nil {
 		discardBlock = lipgloss.JoinVertical(lipgloss.Center,
-			styleDim.Render("discard"),
+			styleDim.Render("pozo"),
 			renderMiniCard(s.DiscardTop),
 		)
 	} else {
 		discardBlock = lipgloss.JoinVertical(lipgloss.Center,
-			styleDim.Render("discard"),
+			styleDim.Render("pozo"),
 			styleDim.Render("╭────╮\n│    │\n╰────╯"),
 		)
 	}
 
 	stockBlock := lipgloss.JoinVertical(lipgloss.Center,
-		styleDim.Render("stock"),
+		styleDim.Render("mazo"),
 		renderStockPile(s.StockCount),
 	)
 

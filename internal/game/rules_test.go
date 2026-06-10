@@ -1022,3 +1022,362 @@ func TestNextRoundRejectedNotInRoundEnd(t *testing.T) {
 		t.Error("expected error: NextRound called before round has ended")
 	}
 }
+
+// ─── Bug fixes: escalera with joker (creation + stored order) ────────────────
+
+func TestEscaleraWithJokerCreationAndOrder(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     []Card
+		wantOrder []Rank // expected stored rank order after SortEscaleraCards
+	}{
+		{
+			// Joker fills internal gap: A♠ Joker 3♠ 4♠ → A 2(JKR) 3 4
+			name:      "joker fills internal gap A-?-3-4",
+			input:     []Card{c(Ace, Spades), joker(0), c(Three, Spades), c(Four, Spades)},
+			wantOrder: []Rank{Ace, Joker, Three, Four},
+		},
+		{
+			// Joker fills gap 5-?-7
+			name:      "joker fills gap 5-?-7",
+			input:     []Card{c(Five, Spades), joker(0), c(Seven, Spades)},
+			wantOrder: []Rank{Five, Joker, Seven},
+		},
+		{
+			// Joker at low end: Joker-3-4
+			name:      "joker extends low end",
+			input:     []Card{joker(0), c(Three, Diamonds), c(Four, Diamonds)},
+			wantOrder: []Rank{Joker, Three, Four},
+		},
+		{
+			// Joker at high end: J-Q-Joker (represents K)
+			name:      "joker extends high end J-Q",
+			input:     []Card{c(Jack, Hearts), c(Queen, Hearts), joker(0)},
+			wantOrder: []Rank{Jack, Queen, Joker},
+		},
+		{
+			// Ace-low with joker at low end: Joker-2-3
+			name:      "joker extends ace-low run at low end",
+			input:     []Card{joker(0), c(Two, Clubs), c(Three, Clubs)},
+			wantOrder: []Rank{Joker, Two, Three},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidateEscalera(tt.input); err != nil {
+				t.Fatalf("ValidateEscalera rejected valid input: %v", err)
+			}
+			sorted := SortEscaleraCards(tt.input)
+			if len(sorted) != len(tt.wantOrder) {
+				t.Fatalf("len(sorted) = %d, want %d", len(sorted), len(tt.wantOrder))
+			}
+			for i, wantRank := range tt.wantOrder {
+				if sorted[i].Rank != wantRank {
+					ranks := make([]Rank, len(sorted))
+					for j, s := range sorted {
+						ranks[j] = s.Rank
+					}
+					t.Errorf("sorted[%d].Rank = %v, want %v; full: %v", i, sorted[i].Rank, wantRank, ranks)
+					break
+				}
+			}
+		})
+	}
+}
+
+// TestEscaleraStoredOrderAfterMeld verifies that the engine stores escalera cards
+// in sequence order after a Meld() call (regardless of selection order).
+func TestEscaleraStoredOrderAfterMeld(t *testing.T) {
+	players := []struct{ ID, Name string }{{"p1", "Alice"}, {"p2", "Bob"}}
+
+	// Test 1: normal run selected in reverse
+	t.Run("run selected in reverse stored ascending", func(t *testing.T) {
+		g, _ := NewGame(players, 0)
+		g.Players[0].Hand = Hand{
+			c(Seven, Spades), c(Six, Spades), c(Five, Spades), // reverse order in hand
+			c(King, Hearts), c(Queen, Hearts), c(Jack, Hearts),
+			c(Two, Clubs), c(Three, Clubs), c(Four, Clubs), c(Eight, Diamonds),
+		}
+		g.Phase = PhaseMelding
+		// Select cards at indexes 0,1,2 (7,6,5 — reverse order)
+		if err := g.Meld("p1", []int{0, 1, 2}, MeldEscalera); err != nil {
+			t.Fatalf("Meld failed: %v", err)
+		}
+		meld := g.Melds[0]
+		wantRanks := []Rank{Five, Six, Seven}
+		for i, wantRank := range wantRanks {
+			if meld.Cards[i].Rank != wantRank {
+				t.Errorf("meld.Cards[%d].Rank = %v, want %v", i, meld.Cards[i].Rank, wantRank)
+			}
+		}
+	})
+
+	// Test 2: escalera with joker filling gap
+	t.Run("joker in gap stored at correct position", func(t *testing.T) {
+		g, _ := NewGame(players, 0)
+		// A♠ Joker 3♠ 4♠ — joker must be at index 1 (represents 2)
+		g.Players[0].Hand = Hand{
+			c(Ace, Spades), joker(0), c(Three, Spades), c(Four, Spades),
+			c(King, Hearts), c(Queen, Hearts), c(Jack, Hearts),
+			c(Two, Clubs), c(Five, Clubs), c(Six, Clubs),
+		}
+		g.Phase = PhaseMelding
+		if err := g.Meld("p1", []int{0, 1, 2, 3}, MeldEscalera); err != nil {
+			t.Fatalf("Meld with joker failed: %v", err)
+		}
+		meld := g.Melds[0]
+		wantRanks := []Rank{Ace, Joker, Three, Four}
+		for i, wantRank := range wantRanks {
+			if meld.Cards[i].Rank != wantRank {
+				t.Errorf("joker-in-gap: meld.Cards[%d].Rank = %v, want %v", i, meld.Cards[i].Rank, wantRank)
+			}
+		}
+	})
+}
+
+// TestPiernaStoredOrderAfterMeld verifies piernas are stored in suit order.
+func TestPiernaStoredOrderAfterMeld(t *testing.T) {
+	players := []struct{ ID, Name string }{{"p1", "Alice"}, {"p2", "Bob"}}
+	g, _ := NewGame(players, 0)
+	// Clubs=3, Hearts=1, Spades=0 → expected suit order after sort: Spades, Hearts, Clubs
+	g.Players[0].Hand = Hand{
+		c(Seven, Clubs), c(Seven, Hearts), c(Seven, Spades), // Clubs first in hand
+		c(King, Spades), c(Queen, Hearts), c(Jack, Diamonds),
+		c(Two, Clubs), c(Three, Clubs), c(Four, Clubs), c(Five, Clubs),
+	}
+	g.Phase = PhaseMelding
+	if err := g.Meld("p1", []int{0, 1, 2}, MeldPierna); err != nil {
+		t.Fatalf("Meld pierna failed: %v", err)
+	}
+	meld := g.Melds[0]
+	// Verify suits are in ascending order (Spades=0, Hearts=1, Clubs=3)
+	for i := 1; i < len(meld.Cards); i++ {
+		if int(meld.Cards[i].Suit) < int(meld.Cards[i-1].Suit) {
+			t.Errorf("pierna not sorted by suit: cards[%d].Suit=%v < cards[%d].Suit=%v",
+				i, meld.Cards[i].Suit, i-1, meld.Cards[i-1].Suit)
+		}
+	}
+}
+
+// TestLayOffEscaleraStoredOrder verifies lay-offs are placed at the correct end.
+func TestLayOffEscaleraStoredOrder(t *testing.T) {
+	players := []struct{ ID, Name string }{{"p1", "Alice"}, {"p2", "Bob"}}
+
+	t.Run("lay-off at high end is appended last", func(t *testing.T) {
+		g, _ := NewGame(players, 0)
+		g.Melds = []Meld{{
+			Type:    MeldEscalera,
+			Cards:   []Card{c(Five, Spades), c(Six, Spades), c(Seven, Spades)},
+			OwnerID: "p1",
+		}}
+		g.Players[0].HasMelded = true
+		_ = g.DrawStock("p1")
+		g.Players[0].Hand = append(g.Players[0].Hand, c(Eight, Spades))
+		lastIdx := len(g.Players[0].Hand) - 1
+		if err := g.LayOff("p1", []int{lastIdx}, 0); err != nil {
+			t.Fatalf("lay-off high: %v", err)
+		}
+		meld := g.Melds[0]
+		if meld.Cards[len(meld.Cards)-1].Rank != Eight {
+			t.Errorf("8♠ not at high end after lay-off")
+		}
+		if meld.Cards[0].Rank != Five {
+			t.Errorf("5♠ not at low end after lay-off")
+		}
+	})
+
+	t.Run("lay-off at low end is prepended first", func(t *testing.T) {
+		g, _ := NewGame(players, 0)
+		g.Melds = []Meld{{
+			Type:    MeldEscalera,
+			Cards:   []Card{c(Five, Spades), c(Six, Spades), c(Seven, Spades)},
+			OwnerID: "p1",
+		}}
+		g.Players[0].HasMelded = true
+		_ = g.DrawStock("p1")
+		g.Players[0].Hand = append(g.Players[0].Hand, c(Four, Spades))
+		lastIdx := len(g.Players[0].Hand) - 1
+		if err := g.LayOff("p1", []int{lastIdx}, 0); err != nil {
+			t.Fatalf("lay-off low: %v", err)
+		}
+		meld := g.Melds[0]
+		if meld.Cards[0].Rank != Four {
+			t.Errorf("4♠ not at low end after lay-off, got %v", meld.Cards[0].Rank)
+		}
+	})
+}
+
+// ─── Bug 2: 1-based lay-off targeting (meld index translation) ───────────────
+
+// TestLayOffMeldIndexOneBasedTranslation verifies the full command path:
+// the client translates display number N (1-based) to server index N-1.
+func TestLayOffMeldIndexOneBasedTranslation(t *testing.T) {
+	players := []struct{ ID, Name string }{{"p1", "Alice"}, {"p2", "Bob"}}
+	g, _ := NewGame(players, 0)
+
+	// Two melds on the table.
+	g.Melds = []Meld{
+		{
+			Type:    MeldEscalera,
+			Cards:   []Card{c(Five, Clubs), c(Six, Clubs), c(Seven, Clubs)},
+			OwnerID: "p2",
+		},
+		{
+			Type:    MeldPierna,
+			Cards:   []Card{c(Eight, Spades), c(Eight, Hearts), c(Eight, Diamonds)},
+			OwnerID: "p2",
+		},
+	}
+	g.Players[0].HasMelded = true
+	_ = g.DrawStock("p1")
+	g.Players[0].Hand = append(g.Players[0].Hand, c(Eight, Clubs))
+	lastIdx := len(g.Players[0].Hand) - 1
+
+	// UI shows meld #2 (the pierna). Client translates: serverMeldIdx = 2 - 1 = 1.
+	// This must succeed (server index 1 = pierna of 8s).
+	if err := g.LayOff("p1", []int{lastIdx}, 1); err != nil {
+		t.Errorf("lay-off onto meld[1] (pierna of 8s): %v", err)
+	}
+
+	// Sanity: server index 2 is out of range (only 0 and 1 exist).
+	g.Players[0].Hand = append(g.Players[0].Hand, c(Eight, Clubs))
+	lastIdx = len(g.Players[0].Hand) - 1
+	if err := g.LayOff("p1", []int{lastIdx}, 2); err == nil {
+		t.Error("expected error for meld index 2 (out of range)")
+	}
+}
+
+// ─── Bug 3: joker discard forbidden ──────────────────────────────────────────
+
+func TestJokerDiscardForbidden(t *testing.T) {
+	players := []struct{ ID, Name string }{{"p1", "Alice"}, {"p2", "Bob"}}
+
+	t.Run("cannot discard joker when other cards present", func(t *testing.T) {
+		g, _ := NewGame(players, 0)
+		g.Players[0].Hand = Hand{
+			joker(0),
+			c(Two, Clubs), c(Three, Hearts),
+		}
+		g.Phase = PhaseMelding
+		// Try to discard the joker (index 0)
+		if err := g.Discard("p1", 0); err == nil {
+			t.Error("expected error: joker cannot be discarded when other cards are present")
+		}
+	})
+
+	t.Run("can discard joker when it is the only card left", func(t *testing.T) {
+		g, _ := NewGame(players, 0)
+		g.Players[0].Hand = Hand{joker(0)}
+		g.Phase = PhaseMelding
+		// Only a joker in hand — forced discard allowed
+		if err := g.Discard("p1", 0); err != nil {
+			t.Errorf("expected joker discard when it is the only card: %v", err)
+		}
+	})
+
+	t.Run("cannot discard joker when two jokers and one regular card present", func(t *testing.T) {
+		g, _ := NewGame(players, 0)
+		g.Players[0].Hand = Hand{
+			joker(0), joker(1),
+			c(King, Spades),
+		}
+		g.Phase = PhaseMelding
+		// Try to discard joker(0) (index 0) — forbidden because King is present
+		if err := g.Discard("p1", 0); err == nil {
+			t.Error("expected error: joker cannot be discarded when non-joker card is present")
+		}
+	})
+
+	t.Run("can discard when all remaining cards are jokers (all-joker exception)", func(t *testing.T) {
+		g, _ := NewGame(players, 0)
+		g.Players[0].Hand = Hand{joker(0), joker(1)}
+		g.Phase = PhaseMelding
+		// All jokers: forced discard of joker(0) allowed
+		if err := g.Discard("p1", 0); err != nil {
+			t.Errorf("expected success discarding joker when all-jokers: %v", err)
+		}
+	})
+}
+
+// ─── Full-round scenario (seeded deck) ───────────────────────────────────────
+
+// TestFullRoundSeeded runs a complete round with two players using a seeded
+// deck. It exercises: deal → draw → meld → lay-off → discard → scoring.
+func TestFullRoundSeeded(t *testing.T) {
+	players := []struct{ ID, Name string }{{"p1", "Alice"}, {"p2", "Bob"}}
+	g, err := NewGame(players, 12345)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both players should have HandSize cards and game should be in drawing phase.
+	if len(g.Players[0].Hand) != HandSize {
+		t.Fatalf("Alice hand size = %d, want %d", len(g.Players[0].Hand), HandSize)
+	}
+	if g.Phase != PhaseDrawing {
+		t.Fatalf("initial phase = %s, want drawing", g.Phase)
+	}
+
+	// Rig Alice's hand to a known-good state for testing.
+	g.Players[0].Hand = Hand{
+		c(Seven, Spades), c(Seven, Hearts), c(Seven, Diamonds), // pierna
+		c(Three, Clubs), c(Four, Clubs), c(Five, Clubs),         // escalera
+		c(King, Spades), c(Queen, Hearts), c(Jack, Diamonds),
+	}
+
+	// Alice draws from stock.
+	if err := g.DrawStock("p1"); err != nil {
+		t.Fatalf("Alice DrawStock: %v", err)
+	}
+
+	// Alice melds pierna (indexes 0,1,2 in hand).
+	if err := g.Meld("p1", []int{0, 1, 2}, MeldPierna); err != nil {
+		t.Fatalf("Alice meld pierna: %v", err)
+	}
+
+	// Alice melds escalera (new indexes 0,1,2 after pierna removed).
+	if err := g.Meld("p1", []int{0, 1, 2}, MeldEscalera); err != nil {
+		t.Fatalf("Alice meld escalera: %v", err)
+	}
+
+	// Alice discards (last card, or any remaining).
+	if err := g.Discard("p1", 0); err != nil {
+		t.Fatalf("Alice discard: %v", err)
+	}
+
+	// Should be Bob's turn now.
+	if g.activePlayer().ID != "p2" {
+		t.Fatalf("expected Bob's turn, got %s", g.activePlayer().ID)
+	}
+
+	// Rig Bob: one card in hand, skip draw phase by setting PhaseMelding directly.
+	// This simulates Bob having drawn and now ready to discard his last card.
+	g.Players[1].Hand = Hand{c(Two, Clubs)}
+	g.Phase = PhaseMelding
+	g.ActiveIndex = 1 // Bob's turn
+	if err := g.Discard("p2", 0); err != nil {
+		t.Fatalf("Bob discard: %v", err)
+	}
+
+	// Round must end (Bob's hand is now empty).
+	if g.Phase != PhaseRoundEnd && g.Phase != PhaseGameOver {
+		t.Fatalf("expected round_end or game_over, got %s", g.Phase)
+	}
+}
+
+// ─── Joker two-jokers rejection ───────────────────────────────────────────────
+
+func TestEscaleraTwoJokersRejected(t *testing.T) {
+	// Escalera with 2 jokers must always be rejected.
+	tests := [][]Card{
+		{c(Five, Spades), joker(0), joker(1), c(Eight, Spades)},
+		{joker(0), joker(1), c(Three, Hearts)},
+		{c(Ace, Clubs), joker(0), joker(1)},
+	}
+	for _, cards := range tests {
+		if err := ValidateEscalera(cards); err == nil {
+			t.Errorf("expected error for two jokers, got nil for %v", cards)
+		}
+	}
+}

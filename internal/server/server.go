@@ -104,7 +104,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	// First message must be a join command.
 	var cmd protocol.Command
 	if err := protocol.ReadJSON(r, &cmd); err != nil || cmd.Type != protocol.CmdJoin {
-		_ = protocol.SendError(conn, "first message must be a join command")
+		_ = protocol.SendError(conn, "el primer mensaje debe ser un comando de unión")
 		return
 	}
 
@@ -144,13 +144,13 @@ func (s *Server) registerPlayer(conn net.Conn, name string) (string, error) {
 	defer s.mu.Unlock()
 
 	if s.started {
-		return "", fmt.Errorf("game already started")
+		return "", fmt.Errorf("la partida ya comenzó")
 	}
 	if len(s.lobby) >= 6 {
-		return "", fmt.Errorf("game is full (max 6 players)")
+		return "", fmt.Errorf("la sala está llena (máximo 6 jugadores)")
 	}
 	if name == "" {
-		name = fmt.Sprintf("Player%d", len(s.lobby)+1)
+		name = fmt.Sprintf("Jugador%d", len(s.lobby)+1)
 	}
 
 	id := fmt.Sprintf("p%d", len(s.lobby)+1)
@@ -245,21 +245,21 @@ func (s *Server) handleCommand(playerID string, cmd protocol.Command) {
 	case protocol.CmdChat:
 		s.broadcastChatLocked(playerID, cmd.Text)
 	default:
-		s.sendErrorTo(playerID, "unknown command: "+cmd.Type)
+		s.sendErrorTo(playerID, "comando desconocido: "+cmd.Type)
 	}
 }
 
 func (s *Server) handleStart(playerID string) {
 	if playerID != s.hostID {
-		s.sendErrorTo(playerID, "only the host can start the game")
+		s.sendErrorTo(playerID, "solo el anfitrión puede iniciar la partida")
 		return
 	}
 	if s.started {
-		s.sendErrorTo(playerID, "game already started")
+		s.sendErrorTo(playerID, "la partida ya comenzó")
 		return
 	}
 	if len(s.lobby) < 2 {
-		s.sendErrorTo(playerID, "need at least 2 players to start")
+		s.sendErrorTo(playerID, "se necesitan al menos 2 jugadores para comenzar")
 		return
 	}
 
@@ -281,7 +281,7 @@ func (s *Server) handleStart(playerID string) {
 
 func (s *Server) handleAction(playerID string, action func() error) {
 	if !s.started || s.game == nil {
-		s.sendErrorTo(playerID, "game has not started")
+		s.sendErrorTo(playerID, "la partida no ha comenzado")
 		return
 	}
 	if err := action(); err != nil {
@@ -296,7 +296,7 @@ func (s *Server) handleNextRound(playerID string) {
 		return
 	}
 	if s.game.Phase != game.PhaseRoundEnd {
-		s.sendErrorTo(playerID, "round has not ended")
+		s.sendErrorTo(playerID, "la ronda no ha terminado")
 		return
 	}
 	// Only host (or any connected player) triggers next round.
