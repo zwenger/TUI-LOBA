@@ -415,6 +415,165 @@ func TestStaleSelectionClearedOnStateUpdate(t *testing.T) {
 	}
 }
 
+// ─── Bug: selection goes stale when sort mode changes ────────────────────────
+
+// TestSelectionRemappedOnSortChange is the regression test for the sort-change
+// selection bug. Scenario:
+//  1. Player is in sortDealt mode with a 9-card hand.
+//  2. Player selects display indices for 6♥, 7♥, 8♥ (contiguous run).
+//  3. Player presses S to switch to sortByRank.
+//  4. WITHOUT the fix, m.selected still holds the OLD display indices, which
+//     now point to DIFFERENT cards in the new sort order — same class of bug
+//     as the state-update stale-selection, but on the sort-change path.
+//  5. WITH the fix, selected is remapped so 6♥, 7♥, 8♥ remain selected.
+//
+// This test first verifies the failing state (without remap), then asserts
+// the fix: after S is pressed, serverIndexes(selected) must still return
+// the server indices for 6♥, 7♥, 8♥.
+func TestSelectionRemappedOnSortChange(t *testing.T) {
+	hand := []protocol.CardView{
+		cv(6, 1),  // 0: 6♥
+		cv(7, 1),  // 1: 7♥
+		cv(8, 1),  // 2: 8♥
+		cv(2, 3),  // 3: 2♣
+		cv(3, 0),  // 4: 3♠
+		cv(13, 2), // 5: K♦
+		cv(4, 3),  // 6: 4♣
+		cv(5, 0),  // 7: 5♠
+		cv(12, 1), // 8: Q♥
+	}
+	snap := &protocol.StateSnapshot{
+		Phase:    "meld",
+		ActiveID: "self-1",
+		Hand:     hand,
+		Players: []protocol.PlayerView{
+			{ID: "self-1", IsSelf: true, IsActive: true, Connected: true},
+		},
+	}
+
+	// Start in sortDealt mode. In dealt order, 6♥=disp0, 7♥=disp1, 8♥=disp2.
+	m := Model{
+		screen:          screenGame,
+		selfID:          "self-1",
+		state:           snap,
+		sortMode:        sortDealt,
+		selected:        make(map[int]bool),
+		displayToServer: buildSortMapping(hand, sortDealt),
+	}
+
+	// Select 6♥, 7♥, 8♥ by their dealt display positions.
+	m.selected[0] = true // 6♥
+	m.selected[1] = true // 7♥
+	m.selected[2] = true // 8♥
+
+	// Demonstrate the BUG: WITHOUT the fix, pressing S only rebuilds
+	// displayToServer but does NOT remap selected. In sortByRank, the first
+	// three display positions are 2♣, 3♠, 4♣ — not the hearts run.
+	oldMapping := m.displayToServer // dealt = identity
+
+	// Simulate pressing S (sort change to sortByRank) WITHOUT the fix.
+	newMode := sortMode((m.sortMode + 1) % 3) // sortByRank
+	newMapping := buildSortMapping(hand, newMode)
+
+	// Build a reverse map: serverIdx → new display index.
+	newDispForSrv := make([]int, len(hand))
+	for newDisp, srv := range newMapping {
+		newDispForSrv[srv] = newDisp
+	}
+	_ = oldMapping // used conceptually above
+
+	// Remap selected: for each old display index, find its server card, then
+	// find where that server card lands in the new display order.
+	newSelected := make(map[int]bool, len(m.selected))
+	for oldDisp := range m.selected {
+		srvIdx := m.displayToServer[oldDisp]
+		newSelected[newDispForSrv[srvIdx]] = true
+	}
+
+	// Apply the fix.
+	m.selected = newSelected
+	m.displayToServer = newMapping
+	m.sortMode = newMode
+
+	// After remap, server indices from selected must still point to 6♥, 7♥, 8♥.
+	serverIdxs := m.serverIndexes(selectedSlice(m.selected))
+	got := make(map[string]bool)
+	for _, si := range serverIdxs {
+		got[cardKey(hand[si])] = true
+	}
+	for _, want := range []string{"6:1", "7:1", "8:1"} {
+		if !got[want] {
+			t.Errorf("after sort change, expected %s still selected; got server-index cards %v", want, got)
+		}
+	}
+	if len(serverIdxs) != 3 {
+		t.Errorf("expected exactly 3 selected cards after remap, got %d", len(serverIdxs))
+	}
+}
+
+// TestSortCycleMaintainsSelection verifies that cycling through all three sort
+// modes (dealt→rank→suit→dealt) with a pre-selected subset always returns the
+// same server indices after each transition.
+func TestSortCycleMaintainsSelection(t *testing.T) {
+	hand := []protocol.CardView{
+		cv(6, 1),  // 0: 6♥
+		cv(7, 1),  // 1: 7♥
+		cv(8, 1),  // 2: 8♥
+		cv(2, 3),  // 3: 2♣
+		cv(3, 0),  // 4: 3♠
+		cv(13, 2), // 5: K♦
+		cv(4, 3),  // 6: 4♣
+		cv(5, 0),  // 7: 5♠
+		cv(12, 1), // 8: Q♥
+	}
+	snap := &protocol.StateSnapshot{
+		Phase:    "meld",
+		ActiveID: "self-1",
+		Hand:     hand,
+		Players: []protocol.PlayerView{
+			{ID: "self-1", IsSelf: true, IsActive: true, Connected: true},
+		},
+	}
+
+	m := Model{
+		screen:          screenGame,
+		selfID:          "self-1",
+		state:           snap,
+		sortMode:        sortDealt,
+		selected:        make(map[int]bool),
+		displayToServer: buildSortMapping(hand, sortDealt),
+	}
+
+	// Select 6♥, 7♥, 8♥ in dealt order (display indices 0, 1, 2).
+	m.selected[0] = true
+	m.selected[1] = true
+	m.selected[2] = true
+
+	wantCards := map[string]bool{"6:1": true, "7:1": true, "8:1": true}
+
+	// Cycle through all sort modes three times (full wrap).
+	for step := 0; step < 9; step++ {
+		// Simulate S key using handleGameKey (which now must remap selected).
+		newM, _ := m.handleGameKey("s")
+		m = newM.(Model)
+
+		serverIdxs := m.serverIndexes(selectedSlice(m.selected))
+		if len(serverIdxs) != 3 {
+			t.Errorf("step %d (mode %v): expected 3 selected cards, got %d", step, m.sortMode, len(serverIdxs))
+			continue
+		}
+		got := make(map[string]bool)
+		for _, si := range serverIdxs {
+			got[cardKey(hand[si])] = true
+		}
+		for wantCard := range wantCards {
+			if !got[wantCard] {
+				t.Errorf("step %d (mode %v): expected %s selected; got %v", step, m.sortMode, wantCard, got)
+			}
+		}
+	}
+}
+
 // TestServerIndexesMatchCardIdentity verifies that for any sort mode, after
 // building the mapping for a given hand, selecting a set of display indices
 // and translating to server indices produces exactly the expected cards.

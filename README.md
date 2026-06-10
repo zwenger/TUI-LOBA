@@ -171,8 +171,10 @@ no account, no token. Nothing to install or configure.
 ```
 
 That's it. While the tunnel is opening you'll see a status line. Once it's up:
-- The public address is printed to your terminal before the TUI starts (stays in scrollback).
-- The lobby screen shows a banner: **ROOM ADDRESS: bore.pub:XXXXX — share this with your friends**
+- A **ready-to-send share block** is printed to stdout before the TUI starts
+  (stays in scrollback — copy it and send it to friends).
+- The block contains one-liner install + join commands for Linux/macOS and Windows.
+- The lobby screen shows a banner with the address and a reminder to scroll up for the full block.
 
 The port number is assigned randomly each session — share the full address with your friends each time.
 

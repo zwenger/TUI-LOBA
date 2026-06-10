@@ -454,18 +454,47 @@ func (m Model) handleGameKey(key string) (tea.Model, tea.Cmd) {
 		}
 	case "s":
 		// Cycle sort mode: dealt → rank → suit → dealt.
-		m.sortMode = (m.sortMode + 1) % 3
+		// We must remap both cursor and selected display indices so they continue
+		// to refer to the same logical cards after the sort changes.
 		if m.state != nil {
-			// Remap cursor to follow the same logical card.
-			oldServerIdx := m.serverIndex(m.cursor)
+			// Step 1: snapshot the server index of the cursor and each selected
+			// card BEFORE the mapping changes. Do this against the current
+			// (pre-change) displayToServer slice.
+			oldCursorSrv := m.serverIndex(m.cursor)
+
+			// Collect server indices for every currently-selected display index.
+			selectedSrvIdxs := make([]int, 0, len(m.selected))
+			for oldDisp := range m.selected {
+				selectedSrvIdxs = append(selectedSrvIdxs, m.serverIndex(oldDisp))
+			}
+
+			// Step 2: advance mode and rebuild the display→server mapping.
+			m.sortMode = (m.sortMode + 1) % 3
 			m.displayToServer = buildSortMapping(m.state.Hand, m.sortMode)
-			// Find where the same server card ended up in the new display order.
-			for dispIdx, srvIdx := range m.displayToServer {
-				if srvIdx == oldServerIdx {
-					m.cursor = dispIdx
-					break
+
+			// Step 3: build a reverse map server-index → new display index so
+			// we can relocate each tracked card in O(n).
+			newDispForSrv := make([]int, len(m.state.Hand))
+			for newDisp, srv := range m.displayToServer {
+				newDispForSrv[srv] = newDisp
+			}
+
+			// Step 4: remap cursor.
+			if oldCursorSrv >= 0 && oldCursorSrv < len(newDispForSrv) {
+				m.cursor = newDispForSrv[oldCursorSrv]
+			}
+
+			// Step 5: remap selection — translate each server index back to its
+			// new display position. This is the fix for the sort-change stale-
+			// selection bug: without this, old display indices point to different
+			// cards in the new sort order.
+			newSelected := make(map[int]bool, len(selectedSrvIdxs))
+			for _, srvIdx := range selectedSrvIdxs {
+				if srvIdx >= 0 && srvIdx < len(newDispForSrv) {
+					newSelected[newDispForSrv[srvIdx]] = true
 				}
 			}
+			m.selected = newSelected
 		}
 	case "esc":
 		m.selected = make(map[int]bool)
@@ -545,7 +574,9 @@ func (m Model) viewLobby() string {
 		banner := stylePublicAddr.Render(
 			"DIRECCIÓN DE LA SALA: " + m.publicAddr + " — compartila con tus amigos",
 		)
-		b.WriteString(banner + "\n\n")
+		b.WriteString(banner + "\n")
+		// One-line reminder that the full share block is in the scrollback.
+		b.WriteString(styleDim.Render("  (el bloque completo con comandos de instalación está más arriba en tu terminal)") + "\n\n")
 	}
 
 	players := strings.Join(m.lobbyPlayers, "\n  ")

@@ -21,6 +21,9 @@ import (
 
 const defaultPort = "7777"
 
+// repoURL is the canonical clone URL shown in the share block.
+const repoURL = "https://github.com/zwenger/TUI-LOBA"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -108,9 +111,9 @@ func runTunnel(srv *server.Server, opener tunnel.Opener) {
 	defer ln.Close()
 
 	publicAddr := ln.Addr().String()
-	fmt.Printf("\n[tunnel] Public address: %s\n", publicAddr)
-	fmt.Println("[tunnel] Share this address with friends. They run: loba join " + publicAddr)
-	fmt.Println()
+
+	// Print the share block to stdout (outside the TUI, stays in scrollback).
+	printShareBlock(publicAddr)
 
 	// Propagate the address into the lobby so the TUI shows it.
 	srv.SetPublicAddr(publicAddr)
@@ -126,6 +129,26 @@ func runTunnel(srv *server.Server, opener tunnel.Opener) {
 	}
 }
 
+
+// printShareBlock prints a ready-to-copy invite block to stdout.
+// It runs before the TUI takes over the terminal, so the text stays in
+// the scrollback buffer and is easy to copy-paste to friends.
+func printShareBlock(addr string) {
+	sep := "──────────────────────────────────────────────────────────"
+	fmt.Println()
+	fmt.Println("── Pasale esto a tus amigos " + sep[28:])
+	fmt.Println()
+	fmt.Println("Linux / macOS:")
+	fmt.Printf("  git clone %s && cd TUI-LOBA && ./play.sh join %s --name TU_NOMBRE\n", repoURL, addr)
+	fmt.Printf("  (si ya lo tenés clonado: cd TUI-LOBA && ./play.sh join %s --name TU_NOMBRE)\n", addr)
+	fmt.Println()
+	fmt.Println("Windows (PowerShell, requiere Go y Git):")
+	fmt.Printf("  git clone %s; cd TUI-LOBA; go build -o loba.exe .; .\\loba.exe join %s --name TU_NOMBRE\n", repoURL, addr)
+	fmt.Printf("  (si ya lo tenés clonado: cd TUI-LOBA; git pull; go build -o loba.exe .; .\\loba.exe join %s --name TU_NOMBRE)\n", addr)
+	fmt.Println()
+	fmt.Println(sep)
+	fmt.Println()
+}
 
 // ─── Join ─────────────────────────────────────────────────────────────────────
 
