@@ -1044,10 +1044,10 @@ func TestEscaleraWithJokerCreationAndOrder(t *testing.T) {
 			wantOrder: []Rank{Five, Joker, Seven},
 		},
 		{
-			// Joker at low end: Joker-3-4
-			name:      "joker extends low end",
+			// No internal gap; both ends open → joker goes to HIGH end (represents 5).
+			name:      "joker extends high end 3-4",
 			input:     []Card{joker(0), c(Three, Diamonds), c(Four, Diamonds)},
-			wantOrder: []Rank{Joker, Three, Four},
+			wantOrder: []Rank{Three, Four, Joker},
 		},
 		{
 			// Joker at high end: J-Q-Joker (represents K)
@@ -1056,10 +1056,10 @@ func TestEscaleraWithJokerCreationAndOrder(t *testing.T) {
 			wantOrder: []Rank{Jack, Queen, Joker},
 		},
 		{
-			// Ace-low with joker at low end: Joker-2-3
-			name:      "joker extends ace-low run at low end",
+			// Ace-low run 2-3; both ends open (low=rep Ace, high=rep 4) → HIGH end by convention.
+			name:      "joker extends ace-low run 2-3 at high end",
 			input:     []Card{joker(0), c(Two, Clubs), c(Three, Clubs)},
-			wantOrder: []Rank{Joker, Two, Three},
+			wantOrder: []Rank{Two, Three, Joker},
 		},
 	}
 
@@ -1380,4 +1380,194 @@ func TestEscaleraTwoJokersRejected(t *testing.T) {
 			t.Errorf("expected error for two jokers, got nil for %v", cards)
 		}
 	}
+}
+
+// ─── Regression: no-gap joker placement (the reported bug) ───────────────────
+
+// TestJokerNoGapPlacement is a direct regression for the reported bug:
+// escalera {9♦, 10♦, J♦, JOKER} has no internal gap, so the joker must sit at
+// an END. Convention: HIGH end (represents Q♦) when both ends are open.
+func TestJokerNoGapPlacement(t *testing.T) {
+	// All meaningful selection orders.
+	orders := [][]Card{
+		{c(Nine, Diamonds), c(Ten, Diamonds), c(Jack, Diamonds), joker(0)},
+		{c(Nine, Diamonds), joker(0), c(Ten, Diamonds), c(Jack, Diamonds)},
+		{joker(0), c(Nine, Diamonds), c(Ten, Diamonds), c(Jack, Diamonds)},
+		{c(Ten, Diamonds), c(Nine, Diamonds), c(Jack, Diamonds), joker(0)},
+		{c(Jack, Diamonds), c(Ten, Diamonds), c(Nine, Diamonds), joker(0)},
+		{joker(0), c(Jack, Diamonds), c(Ten, Diamonds), c(Nine, Diamonds)},
+	}
+	for _, input := range orders {
+		if err := ValidateEscalera(input); err != nil {
+			t.Fatalf("ValidateEscalera(%v) = %v, want nil", input, err)
+		}
+		sorted := SortEscaleraCards(input)
+		// Joker must be at index 0 or last index only.
+		jokerIdx := -1
+		for i, card := range sorted {
+			if card.IsJoker() {
+				jokerIdx = i
+			}
+		}
+		last := len(sorted) - 1
+		if jokerIdx != 0 && jokerIdx != last {
+			ranks := make([]Rank, len(sorted))
+			for j, s := range sorted {
+				ranks[j] = s.Rank
+			}
+			t.Errorf("input %v → joker at internal index %d (ranks: %v); must be at 0 or %d", input, jokerIdx, ranks, last)
+		}
+		// Convention: HIGH end when both ends are open.
+		if jokerIdx != last {
+			ranks := make([]Rank, len(sorted))
+			for j, s := range sorted {
+				ranks[j] = s.Rank
+			}
+			t.Errorf("input %v → joker at index %d (ranks: %v); want HIGH end (index %d)", input, jokerIdx, ranks, last)
+		}
+	}
+}
+
+// TestJokerBoundaryPlacement checks end-forced and both-open scenarios.
+func TestJokerBoundaryPlacement(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     []Card
+		wantOrder []Rank
+	}{
+		{
+			// Q-K: aceHigh context (King present), maxHigh=14, canGoHigh=true (13<14),
+			// canGoLow=true → both ends open → HIGH end (joker represents Ace).
+			name:      "joker goes to HIGH end Q-K (represents A)",
+			input:     []Card{c(Queen, Spades), c(King, Spades), joker(0)},
+			wantOrder: []Rank{Queen, King, Joker},
+		},
+		{
+			// Ace-high Q-K-A: only LOW end possible (high=A=14=maxHigh → canGoHigh=false).
+			name:      "joker forced to LOW end Q-K-A (represents J)",
+			input:     []Card{c(Queen, Hearts), c(King, Hearts), c(Ace, Hearts), joker(0)},
+			wantOrder: []Rank{Joker, Queen, King, Ace},
+		},
+		{
+			// Ace-low A-2: canGoLow=false (low=A=1), HIGH end (represents 3).
+			name:      "joker goes to HIGH end A-2 (represents 3)",
+			input:     []Card{c(Ace, Clubs), c(Two, Clubs), joker(0)},
+			wantOrder: []Rank{Ace, Two, Joker},
+		},
+		{
+			// 9-10-J: both ends open → HIGH end (represents Q).
+			name:      "joker at HIGH end 9-10-J (represents Q)",
+			input:     []Card{c(Nine, Diamonds), c(Ten, Diamonds), c(Jack, Diamonds), joker(0)},
+			wantOrder: []Rank{Nine, Ten, Jack, Joker},
+		},
+		{
+			// J-Q-K: aceHigh context, maxHigh=14, canGoHigh=true (K=13<14) → both ends open
+			// → HIGH end (joker represents Ace).
+			name:      "joker goes to HIGH end J-Q-K (represents A)",
+			input:     []Card{c(Jack, Clubs), c(Queen, Clubs), c(King, Clubs), joker(0)},
+			wantOrder: []Rank{Jack, Queen, King, Joker},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidateEscalera(tt.input); err != nil {
+				t.Fatalf("ValidateEscalera rejected: %v", err)
+			}
+			sorted := SortEscaleraCards(tt.input)
+			if len(sorted) != len(tt.wantOrder) {
+				t.Fatalf("len(sorted)=%d, want %d", len(sorted), len(tt.wantOrder))
+			}
+			for i, want := range tt.wantOrder {
+				if sorted[i].Rank != want {
+					ranks := make([]Rank, len(sorted))
+					for j, s := range sorted {
+						ranks[j] = s.Rank
+					}
+					t.Errorf("sorted[%d].Rank = %v, want %v; full: %v", i, sorted[i].Rank, want, ranks)
+					break
+				}
+			}
+		})
+	}
+}
+
+// TestJokerLayOffOnEscalera checks joker lay-off onto both ends and rejection when
+// escalera already has a joker.
+func TestJokerLayOffOnEscalera(t *testing.T) {
+	base := func() *Meld {
+		return &Meld{
+			Type:  MeldEscalera,
+			Cards: []Card{c(Five, Spades), c(Six, Spades), c(Seven, Spades)},
+		}
+	}
+	withJokerHigh := func() *Meld {
+		// 5-6-7-JKR (joker at high end, represents 8)
+		return &Meld{
+			Type:  MeldEscalera,
+			Cards: []Card{c(Five, Spades), c(Six, Spades), c(Seven, Spades), joker(0)},
+		}
+	}
+	withJokerLow := func() *Meld {
+		// JKR-5-6-7 (joker at low end, represents 4)
+		return &Meld{
+			Type:  MeldEscalera,
+			Cards: []Card{joker(0), c(Five, Spades), c(Six, Spades), c(Seven, Spades)},
+		}
+	}
+
+	t.Run("joker extends high end of plain escalera", func(t *testing.T) {
+		m := base()
+		if err := CanLayOffEscalera(m, joker(1)); err != nil {
+			t.Errorf("expected joker accepted at high end: %v", err)
+		}
+	})
+
+	t.Run("joker extends low end of plain escalera", func(t *testing.T) {
+		// Validation checks both ends; joker should be accepted at low end too.
+		m := base()
+		if err := CanLayOffEscalera(m, joker(1)); err != nil {
+			t.Errorf("expected joker accepted: %v", err)
+		}
+	})
+
+	t.Run("reject second joker when escalera already has one (high)", func(t *testing.T) {
+		m := withJokerHigh()
+		if err := CanLayOffEscalera(m, joker(1)); err == nil {
+			t.Error("expected rejection: escalera already has a joker")
+		}
+	})
+
+	t.Run("reject second joker when escalera already has one (low)", func(t *testing.T) {
+		m := withJokerLow()
+		if err := CanLayOffEscalera(m, joker(1)); err == nil {
+			t.Error("expected rejection: escalera already has a joker")
+		}
+	})
+
+	t.Run("lay real card adjacent to joker-held high end is accepted", func(t *testing.T) {
+		// 5-6-7-JKR(=8): lay off 8♠ — the real card the joker represents.
+		// This is valid: the joker is re-anchored or the sequence shifts.
+		// The engine uses validateEscaleraSequence which allows this.
+		m := withJokerHigh()
+		if err := CanLayOffEscalera(m, c(Eight, Spades)); err != nil {
+			t.Errorf("expected 8♠ accepted adjacent to joker-high end: %v", err)
+		}
+	})
+
+	t.Run("lay real card beyond joker high end is accepted", func(t *testing.T) {
+		// 5-6-7-JKR(=8): lay off 9♠ — extends beyond joker.
+		m := withJokerHigh()
+		if err := CanLayOffEscalera(m, c(Nine, Spades)); err != nil {
+			t.Errorf("expected 9♠ accepted beyond joker-high end: %v", err)
+		}
+	})
+
+	t.Run("lay real card adjacent to joker-held low end is accepted", func(t *testing.T) {
+		// JKR(=4)-5-6-7: lay off 4♠.
+		m := withJokerLow()
+		if err := CanLayOffEscalera(m, c(Four, Spades)); err != nil {
+			t.Errorf("expected 4♠ accepted adjacent to joker-low end: %v", err)
+		}
+	})
 }

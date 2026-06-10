@@ -190,21 +190,12 @@ func SortEscaleraCards(cards []Card) []Card {
 
 		switch {
 		case canGoLow && !canGoHigh:
-			// Only low end is possible (high already at King/Ace-high boundary).
+			// Only the low end is possible (high boundary already at King or Ace-high).
 			result = append([]Card{*jokerCard}, result...)
-		case !canGoLow && canGoHigh:
-			// Only high end is possible (low already at Ace, can't go below).
-			result = append(result, *jokerCard)
-		case aceHigh && highRank == 13:
-			// High end: joker represents Ace-high (rank 14) in a run ending at King.
-			result = append(result, *jokerCard)
-		case highRank+1 == 13:
-			// High end: joker represents King — a natural boundary card.
-			// Covers J-Q-Joker and similar runs ending just before King.
-			result = append(result, *jokerCard)
 		default:
-			// Both ends possible, no special boundary: place at low end.
-			result = append([]Card{*jokerCard}, result...)
+			// High end is possible (and preferred by convention when both ends are open).
+			// This covers: only-high, both-ends-open, ace-high-King-end, King-boundary.
+			result = append(result, *jokerCard)
 		}
 	}
 
