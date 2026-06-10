@@ -16,3 +16,6 @@ dist/
 *.test
 *.out
 coverage.html
+
+# Agent tooling
+.atl/
