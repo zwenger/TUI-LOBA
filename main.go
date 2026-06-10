@@ -3,9 +3,11 @@
 //
 //	loba host [--port 7777] [--name Alvaro] [--public]
 //	loba join <host:port> [--name Pablo]
+//	loba           (no arguments → interactive start menu)
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -13,22 +15,25 @@ import (
 	"loba/internal/server"
 	"loba/internal/tunnel"
 	"os"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
-
 
 const defaultPort = "7777"
 
 // repoURL is the canonical clone URL shown in the share block.
 const repoURL = "https://github.com/zwenger/TUI-LOBA"
 
+// ─── Startup decision ─────────────────────────────────────────────────────────
+
 func main() {
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(1)
+		runMenu()
+		return
 	}
 
 	cmd := os.Args[1]
@@ -41,6 +46,7 @@ func main() {
 		runJoin(args)
 	default:
 		usage()
+		windowsPause()
 		os.Exit(1)
 	}
 }
@@ -51,10 +57,91 @@ func usage() {
 Usage:
   loba host [--port 7777] [--name YourName] [--public]   Start a game server and join as host
   loba join <host:port> [--name YourName]                Join an existing game
+  loba                                                   Interactive start menu
 
 Flags (host):
   --public   Open a public TCP tunnel via bore.pub so friends can join from
              anywhere. No account or token required.`)
+}
+
+// windowsPause waits for Enter on Windows so a double-clicked console window
+// stays open long enough for the user to read the message. No-op on other OSes.
+func windowsPause() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "\nPresioná Enter para salir...")
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+}
+
+// ─── Interactive menu (no-args path) ─────────────────────────────────────────
+
+// menuState holds the server and tunnel state created during the menu bootstrap
+// so the tunnel goroutine can be started after the program reference is available.
+type menuState struct {
+	mu     sync.Mutex
+	srv    *server.Server
+	public bool
+	progCh chan *tea.Program // non-nil when public=true
+}
+
+func runMenu() {
+	ms := &menuState{}
+
+	hostFn := func(port string, public bool, progCh chan<- *tea.Program) (string, error) {
+		srv, localAddr, err := startServer(port, "")
+		if err != nil {
+			return "", err
+		}
+		ms.mu.Lock()
+		ms.srv = srv
+		ms.public = public
+		if public {
+			// Allocate the channel; it will be filled with the *tea.Program
+			// by the goroutine started below once p is known.
+			ch := make(chan *tea.Program, 1)
+			ms.progCh = ch
+		}
+		ms.mu.Unlock()
+		return localAddr, nil
+	}
+
+	joinFn := func(addr string) (string, error) {
+		return normaliseAddr(addr)
+	}
+
+	m := client.NewMenu(hostFn, joinFn)
+	p := tea.NewProgram(m, tea.WithAltScreen())
+
+	// This goroutine waits until the host bootstrap has set ms.srv, then
+	// launches the tunnel goroutine with p injected into the channel.
+	go func() {
+		// Poll until srv is set (bootstrap happens inside a tea.Cmd goroutine).
+		for {
+			ms.mu.Lock()
+			srv := ms.srv
+			public := ms.public
+			progCh := ms.progCh
+			ms.mu.Unlock()
+			if srv != nil && public && progCh != nil {
+				progCh <- p
+				runTunnel(srv, tunnel.BoreOpener{}, progCh)
+				return
+			}
+			if srv != nil && !public {
+				// Host without tunnel — nothing more to do.
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+		windowsPause()
+		os.Exit(1)
+	}
 }
 
 // ─── Host ─────────────────────────────────────────────────────────────────────
@@ -71,26 +158,15 @@ func runHost(args []string) {
 		opener = tunnel.BoreOpener{}
 	}
 
-	localAddr := "localhost:" + *port
-	srv := server.New(*port, *name)
-
-	// Start the local TCP server.
-	go func() {
-		if err := srv.ListenAndServe(); err != nil {
-			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
-			os.Exit(1)
-		}
-	}()
-
-	// Small delay to let the server start listening.
-	time.Sleep(150 * time.Millisecond)
+	srv, localAddr, err := startServer(*port, *name)
+	if err != nil {
+		showFatalError(err)
+		return
+	}
 
 	m := client.New(localAddr, *name)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
-	// Open the tunnel (no-op when --public is not set).
-	// progCh delivers the *Program to the tunnel goroutine once it exists,
-	// so p.Println can be called safely after the TUI is running.
 	if *public {
 		progCh := make(chan *tea.Program, 1)
 		progCh <- p
@@ -99,9 +175,83 @@ func runHost(args []string) {
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+		windowsPause()
 		os.Exit(1)
 	}
 }
+
+// ─── Join ─────────────────────────────────────────────────────────────────────
+
+func runJoin(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "error: join requires <host:port>")
+		usage()
+		windowsPause()
+		os.Exit(1)
+	}
+
+	addr := args[0]
+	remaining := args[1:]
+
+	fs := flag.NewFlagSet("join", flag.ExitOnError)
+	name := fs.String("name", "", "Your display name")
+	_ = fs.Parse(remaining)
+
+	m := client.New(addr, *name)
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+		windowsPause()
+		os.Exit(1)
+	}
+}
+
+// ─── Shared bootstrap helpers ─────────────────────────────────────────────────
+
+// startServer creates and starts a TCP server on the given port.
+// Returns the server instance, local address, and any startup error.
+// It waits up to 200 ms for the listener to bind and checks for early failures.
+func startServer(port, name string) (*server.Server, string, error) {
+	srv := server.New(port, name)
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil {
+			errCh <- err
+		}
+	}()
+	// Give the server time to bind; check for early failure.
+	select {
+	case err := <-errCh:
+		return nil, "", fmt.Errorf("no se pudo iniciar el servidor en el puerto %s: %w", port, err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	return srv, "localhost:" + port, nil
+}
+
+// normaliseAddr returns addr unchanged if it contains a colon (host:port),
+// otherwise appends the default port.
+func normaliseAddr(addr string) (string, error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "", fmt.Errorf("la dirección no puede estar vacía")
+	}
+	if !strings.Contains(addr, ":") {
+		addr = addr + ":" + defaultPort
+	}
+	return addr, nil
+}
+
+// showFatalError launches a minimal TUI that shows err and waits for Enter.
+func showFatalError(err error) {
+	m := client.NewFatalError(err.Error())
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	if _, tuiErr := p.Run(); tuiErr != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		windowsPause()
+	}
+}
+
+// ─── Tunnel ───────────────────────────────────────────────────────────────────
 
 // runTunnel opens a bore.pub tunnel and starts a second accept loop that feeds
 // connections from the public internet into the same server. The host's own
@@ -183,29 +333,5 @@ func buildShareLines(addr string) []string {
 		rejoinPS(),
 		sep,
 		"",
-	}
-}
-
-// ─── Join ─────────────────────────────────────────────────────────────────────
-
-func runJoin(args []string) {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "error: join requires <host:port>")
-		usage()
-		os.Exit(1)
-	}
-
-	addr := args[0]
-	remaining := args[1:]
-
-	fs := flag.NewFlagSet("join", flag.ExitOnError)
-	name := fs.String("name", "", "Your display name")
-	_ = fs.Parse(remaining)
-
-	m := client.New(addr, *name)
-	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
-		os.Exit(1)
 	}
 }

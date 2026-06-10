@@ -88,7 +88,8 @@ func (s sortMode) String() string {
 type screen int
 
 const (
-	screenName      screen = iota // name entry prompt
+	screenMenu      screen = iota // start menu (no-args launch)
+	screenName                    // name entry prompt
 	screenLobby                   // waiting room
 	screenSeats                   // seat picker (reconnect to a started game)
 	screenGame                    // main game table
@@ -96,6 +97,7 @@ const (
 	screenOver                    // game-over / winner
 	screenScoreTable              // full-screen score table (toggled by P)
 	screenEventLog                // full-screen event log   (toggled by L)
+	screenFatalError              // fatal error before/at startup; Enter to quit
 )
 
 // maxClientEventHistory is the cap for the client-side event history.
@@ -109,6 +111,28 @@ type connErrMsg struct{ err error }
 type serverMsg struct{ env protocol.Envelope }
 type tickMsg struct{}
 
+// HostBootstrapFunc is called when the user selects "Crear sala" from the menu.
+// It must start the server in-process, open the tunnel if public is true, and
+// return the local address to connect to (e.g. "localhost:7777"). It may also
+// return a non-nil *tea.Program after the TUI starts via the progCh channel
+// (for tunnel share-line printing); that is orchestrated outside the model.
+type HostBootstrapFunc func(port string, public bool, progCh chan<- *tea.Program) (localAddr string, err error)
+
+// JoinBootstrapFunc validates and normalises the user-supplied address.
+type JoinBootstrapFunc func(addr string) (normalised string, err error)
+
+// bootstrapHostMsg is sent back to the model when the host bootstrap succeeded.
+type bootstrapHostMsg struct {
+	addr   string
+	progCh chan<- *tea.Program // non-nil when public tunnel was requested
+}
+
+// bootstrapJoinMsg is sent back to the model when the join address is ready.
+type bootstrapJoinMsg struct{ addr string }
+
+// bootstrapErrMsg carries a fatal bootstrap error to display in-TUI.
+type bootstrapErrMsg struct{ err error }
+
 // ─── Model ────────────────────────────────────────────────────────────────────
 
 // Model is the Bubbletea model for the Loba client.
@@ -116,6 +140,20 @@ type Model struct {
 	screen screen
 	addr   string
 	name   string // player display name
+
+	// menu (start screen shown when launched with no subcommand)
+	menuCursor    int    // 0=Crear sala 1=Unirse a sala 2=Salir
+	menuPublic    bool   // "sala pública (túnel)" toggle for host
+	menuAddrInput string // address typed in the join sub-screen
+	menuAddrErr   string // inline validation error for join address
+	menuSubScreen int    // 0=main menu  1=join address input  2=host confirm
+
+	// bootstrap callbacks injected by main when launching in menu mode
+	hostBootstrap HostBootstrapFunc
+	joinBootstrap JoinBootstrapFunc
+
+	// fatalError is shown on screenFatalError; user presses Enter to quit.
+	fatalError string
 
 	// name entry
 	nameInput string
@@ -169,7 +207,7 @@ type Model struct {
 	height int
 }
 
-// New returns the initial model.
+// New returns the initial model for a direct host/join launch (CLI subcommand path).
 func New(addr, name string) Model {
 	m := Model{
 		addr:     addr,
@@ -183,9 +221,35 @@ func New(addr, name string) Model {
 	return m
 }
 
+// NewMenu returns the initial model for an interactive (no-args) launch.
+// The caller must inject hostBootstrap and joinBootstrap so the menu can
+// trigger the same bootstrap logic as the CLI subcommands.
+func NewMenu(hostFn HostBootstrapFunc, joinFn JoinBootstrapFunc) Model {
+	return Model{
+		screen:        screenMenu,
+		selected:      make(map[int]bool),
+		hostBootstrap: hostFn,
+		joinBootstrap: joinFn,
+	}
+}
+
+// NewFatalError returns a model that immediately shows a fatal error with an
+// "Enter to quit" prompt. Used when a pre-TUI error must be shown inside the TUI.
+func NewFatalError(msg string) Model {
+	return Model{
+		screen:     screenFatalError,
+		fatalError: msg,
+		selected:   make(map[int]bool),
+	}
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
+	// Menu and fatal-error screens don't connect on start.
+	if m.screen == screenMenu || m.screen == screenFatalError {
+		return nil
+	}
 	// Connect immediately regardless of whether we have a name.
 	// The server will tell us if it needs a name (lobby + empty name path).
 	return connectCmd(m.addr)
@@ -199,6 +263,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		return m, nil
+
+	case bootstrapHostMsg:
+		// Host bootstrap succeeded; now connect to localhost as a player.
+		m.addr = msg.addr
+		m.screen = screenLobby
+		return m, connectCmd(m.addr)
+
+	case bootstrapJoinMsg:
+		// Address is ready; connect to the remote server.
+		m.addr = msg.addr
+		m.screen = screenLobby
+		return m, connectCmd(m.addr)
+
+	case bootstrapErrMsg:
+		// Bootstrap failed (port busy, tunnel error, etc.) — show in-TUI error.
+		m.screen = screenFatalError
+		m.fatalError = msg.err.Error()
 		return m, nil
 
 	case connectedMsg:
@@ -333,11 +415,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	// Global quit (q works on all screens except in-game where it conflicts with lay-off numbering).
-	if key == "ctrl+c" || (key == "q" && m.screen != screenGame) {
+	if key == "ctrl+c" || (key == "q" && m.screen != screenGame && m.screen != screenMenu) {
 		return m, tea.Quit
 	}
 
 	switch m.screen {
+	case screenMenu:
+		return m.handleMenuKey(key)
+	case screenFatalError:
+		return m.handleFatalErrorKey(key)
 	case screenName:
 		return m.handleNameKey(key)
 	case screenLobby:
@@ -756,6 +842,10 @@ func (m *Model) hasSuffix(candidate []string) bool {
 
 func (m Model) View() string {
 	switch m.screen {
+	case screenMenu:
+		return m.viewMenu()
+	case screenFatalError:
+		return m.viewFatalError()
 	case screenName:
 		return m.viewNameEntry()
 	case screenLobby:

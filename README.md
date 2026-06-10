@@ -110,6 +110,12 @@ Git Bash users can also run the same `./play.sh` invocation as on Linux/macOS.
 Download a binary from the releases page and run it directly — no Go
 installation needed.
 
+**Double-clicking `loba.exe` on Windows** (or `loba` on macOS Finder) opens
+the interactive start menu — no terminal command required. Use the arrow keys
+to choose "Crear sala" or "Unirse a sala" and press Enter.
+
+CLI subcommands still work exactly as before:
+
 ```sh
 ./loba host --port 7777 --name Alvaro
 ./loba join 192.168.1.42:7777 --name Pablo
