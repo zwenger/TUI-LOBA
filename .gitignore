@@ -1,0 +1,18 @@
+# Compiled binaries
+loba
+loba.exe
+dist/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# Go test artifacts
+*.test
+*.out
+coverage.html
