@@ -205,15 +205,13 @@ func make5OpponentState() *protocol.StateSnapshot {
 	return s
 }
 
-// TestOpponentBadgeHeight verifies that every badge produced by renderOpponentBadge
-// has the same rendered height so they align properly in a row.
+// TestOpponentBadgeHeight verifies that every badge produced by renderPlayerBadge
+// (for all players including self) has the same rendered height so they align in a row.
 func TestOpponentBadgeHeight(t *testing.T) {
 	players := make5OpponentState().Players
 	var badges []string
 	for _, p := range players {
-		if !p.IsSelf {
-			badges = append(badges, renderOpponentBadge(p, p.TurnIndex))
-		}
+		badges = append(badges, renderPlayerBadge(p, p.TurnIndex))
 	}
 	if len(badges) == 0 {
 		t.Fatal("no badges produced")
@@ -239,15 +237,13 @@ func TestOpponentBadgeHeight(t *testing.T) {
 }
 
 // TestOpponentBadgeRowUniformHeight checks that when badges are joined horizontally
-// into a row, each line of the joined block is the same width (i.e. lipgloss pads
-// them correctly) and no badge content is split across rows.
+// into a row (all players including self), each line of the joined block is the same
+// width (i.e. lipgloss pads them correctly) and no badge content is split across rows.
 func TestOpponentBadgeRowUniformHeight(t *testing.T) {
 	players := make5OpponentState().Players
 	var badges []string
 	for _, p := range players {
-		if !p.IsSelf {
-			badges = append(badges, renderOpponentBadge(p, p.TurnIndex))
-		}
+		badges = append(badges, renderPlayerBadge(p, p.TurnIndex))
 	}
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, badges...)
@@ -264,7 +260,7 @@ func TestOpponentBadgeRowUniformHeight(t *testing.T) {
 }
 
 // TestOpponentBadgeWrapping verifies that at a narrow terminal width (40 cols)
-// badges wrap to new rows rather than overflowing a single line.
+// badges (all players including self) wrap to new rows rather than overflowing.
 func TestOpponentBadgeWrapping(t *testing.T) {
 	s := make5OpponentState()
 	m := Model{
@@ -276,12 +272,12 @@ func TestOpponentBadgeWrapping(t *testing.T) {
 
 	result := m.renderOpponents(s)
 	lines := strings.Split(strings.TrimRight(result, "\n"), "\n")
-	// With width=40 and 5 badges of ~18 chars each, we must have more than 1 line.
+	// With width=40 and 6 badges (5 opponents + self) of ~18 chars each, we must
+	// have more than 1 line.
 	if len(lines) <= 1 {
 		t.Errorf("expected wrapping at width=40 but got %d line(s)", len(lines))
 	}
-	// No single line should exceed termWidth (plus some ANSI escape overhead is OK;
-	// check rendered/visible width using lipgloss.Width on each line).
+	// No single line should exceed termWidth.
 	for i, line := range lines {
 		w := lipgloss.Width(line)
 		if w > 40 {
@@ -311,7 +307,7 @@ func TestOpponentNameTruncation(t *testing.T) {
 }
 
 // TestOpponentCompactChips verifies that very narrow terminals (width < 60) fall
-// back to chip mode and still wrap whole chips.
+// back to chip mode, include all players (self included), and wrap whole chips.
 func TestOpponentCompactChips(t *testing.T) {
 	s := make5OpponentState()
 	m := Model{
@@ -325,9 +321,15 @@ func TestOpponentCompactChips(t *testing.T) {
 	if strings.Contains(result, "╭") || strings.Contains(result, "┏") {
 		t.Error("compact chip mode should not contain box border characters")
 	}
-	// Must still contain player names (possibly truncated).
-	if !strings.Contains(result, "Alice") {
-		t.Error("chip output missing player name Alice")
+	// Must contain all player names (including self=TestPlayer).
+	for _, name := range []string{"Alice", "TestPlayer"} {
+		if !strings.Contains(result, name) {
+			t.Errorf("chip output missing player name %q", name)
+		}
+	}
+	// Self chip must contain the "*" self marker.
+	if !strings.Contains(result, "*") {
+		t.Error("chip output missing self marker '*' for self player")
 	}
 }
 
@@ -868,9 +870,9 @@ func makeRotationState() *protocol.StateSnapshot {
 	}
 }
 
-// TestOpponentBadgesShowPositionNumbers verifies that opponent badges include
-// the 1-based turn position prefix ("3·", "4·", "1·") in rotation order.
-func TestOpponentBadgesShowPositionNumbers(t *testing.T) {
+// TestAllPlayersRowAbsoluteOrder verifies that the players row includes ALL players
+// (self included) in absolute turn order (TurnIndex 1, 2, 3, 4).
+func TestAllPlayersRowAbsoluteOrder(t *testing.T) {
 	s := makeRotationState()
 	m := Model{
 		screen: screenGame,
@@ -882,20 +884,42 @@ func TestOpponentBadgesShowPositionNumbers(t *testing.T) {
 
 	result := m.renderOpponents(s)
 
-	// Each opponent's position label must appear.
-	for _, pos := range []string{"3·", "4·", "1·"} {
+	// All four position labels must appear (including self at 2·).
+	for _, pos := range []string{"1·", "2·", "3·", "4·"} {
 		if !strings.Contains(result, pos) {
-			t.Errorf("opponent row missing position label %q\nrow:\n%s", pos, result)
+			t.Errorf("players row missing position label %q\nrow:\n%s", pos, result)
 		}
 	}
-	// Self (p2, Bob) must NOT appear in the opponents row.
-	if strings.Contains(result, "Bob") {
-		t.Error("opponents row must not contain self player Bob")
+	// Self (p2, Bob) MUST now appear in the row.
+	if !strings.Contains(result, "Bob") {
+		t.Error("players row must contain self player Bob")
+	}
+	// Self badge must show "(vos)".
+	if !strings.Contains(result, "(vos)") {
+		t.Error("self badge must contain '(vos)' marker")
 	}
 }
 
-// TestOpponentRotationOrder verifies that opponents appear in rotation order
-// starting after self. Self is 2·, so order should be 3·Carlos, 4·Diana, 1·Alice.
+// TestAbsoluteOrderedPlayers verifies that absoluteOrderedPlayers returns all
+// players in TurnIndex 1..N order, self included.
+func TestAbsoluteOrderedPlayers(t *testing.T) {
+	s := makeRotationState()
+	ordered := absoluteOrderedPlayers(s.Players)
+
+	wantOrder := []int{1, 2, 3, 4}
+	if len(ordered) != len(wantOrder) {
+		t.Fatalf("absoluteOrderedPlayers returned %d players, want %d", len(ordered), len(wantOrder))
+	}
+	for i, p := range ordered {
+		if p.TurnIndex != wantOrder[i] {
+			t.Errorf("ordered[%d].TurnIndex = %d, want %d", i, p.TurnIndex, wantOrder[i])
+		}
+	}
+}
+
+// TestOpponentRotationOrder verifies that rotationOrderedOpponents (opponents only,
+// starting after self) still works correctly for callers that need it.
+// Self is 2·, so opponents in rotation order: 3·Carlos, 4·Diana, 1·Alice.
 func TestOpponentRotationOrder(t *testing.T) {
 	s := makeRotationState()
 	opponents := rotationOrderedOpponents(s.Players)
@@ -905,6 +929,40 @@ func TestOpponentRotationOrder(t *testing.T) {
 		if p.TurnIndex != wantOrder[i] {
 			t.Errorf("opponents[%d].TurnIndex = %d, want %d", i, p.TurnIndex, wantOrder[i])
 		}
+	}
+}
+
+// TestSelfBadgeDistinctFromActiveStyle verifies that the self badge uses a
+// different border style than the active-turn badge UNLESS self is also active.
+func TestSelfBadgeDistinctFromActiveStyle(t *testing.T) {
+	// Self, not active: must NOT contain thick-border chars (┃) from styleBadgeActive.
+	selfNotActive := protocol.PlayerView{
+		ID: "me", Name: "Me", CardCount: 5, TotalScore: 10, IsSelf: true, Connected: true,
+	}
+	badge := renderPlayerBadge(selfNotActive, 2)
+	// Double border uses ╔/╗/╚/╝/═/║ — should not use ThickBorder chars (┏/┓/┗/┘/━/┃).
+	if strings.Contains(badge, "┃") || strings.Contains(badge, "━") {
+		t.Error("inactive self badge must not use thick-border chars (reserved for active turn)")
+	}
+	// Self badge must show "(vos)".
+	if !strings.Contains(badge, "(vos)") {
+		t.Error("self badge must contain '(vos)'")
+	}
+
+	// Self AND active: must use thick-border style.
+	selfAndActive := protocol.PlayerView{
+		ID: "me", Name: "Me", CardCount: 5, TotalScore: 10, IsSelf: true, IsActive: true, Connected: true,
+	}
+	activeBadge := renderPlayerBadge(selfAndActive, 2)
+	if !strings.Contains(activeBadge, "▶") {
+		t.Error("active self badge must contain ▶ turn indicator")
+	}
+	if !strings.Contains(activeBadge, "◀") {
+		t.Error("active self badge must contain ◀ turn indicator")
+	}
+	// Active style uses ThickBorder (┃ chars).
+	if !strings.Contains(activeBadge, "┃") {
+		t.Error("active self badge must use thick border (┃) chars")
 	}
 }
 
@@ -993,5 +1051,69 @@ func TestRenderVisualWithRotation(t *testing.T) {
 
 	if strings.TrimSpace(view) == "" {
 		t.Error("viewGame() returned empty string")
+	}
+}
+
+// TestRenderVisualAllPlayersAbsoluteOrder is the mandatory visual sanity test:
+// 4 players, self at position 2, active at position 3, width 100.
+// Players row must show all 4 players in absolute order (1·Alice, 2·Bob(vos), 3·Carlos▶, 4·Diana).
+// Always passes; output is printed for manual inspection.
+// Run with: go test -v -run TestRenderVisualAllPlayersAbsoluteOrder
+func TestRenderVisualAllPlayersAbsoluteOrder(t *testing.T) {
+	s := &protocol.StateSnapshot{
+		Phase:    "play",
+		Round:    1,
+		ActiveID: "p3",
+		NextID:   "p4",
+		Players: []protocol.PlayerView{
+			{ID: "p1", Name: "Alice", CardCount: 9, TotalScore: 0, TurnIndex: 1, Connected: true},
+			{ID: "p2", Name: "Bob", CardCount: 7, TotalScore: 5, TurnIndex: 2, Connected: true, IsSelf: true},
+			{ID: "p3", Name: "Carlos", CardCount: 6, TotalScore: 3, TurnIndex: 3, Connected: true, IsActive: true},
+			{ID: "p4", Name: "Diana", CardCount: 8, TotalScore: 10, TurnIndex: 4, Connected: true},
+		},
+	}
+	hand := makeHand()
+	s.Hand = hand
+
+	m := Model{
+		screen:   screenGame,
+		selfID:   "p2",
+		state:    s,
+		width:    100,
+		height:   40,
+		cursor:   0,
+		selected: make(map[int]bool),
+	}
+	m.displayToServer = make([]int, len(hand))
+	for i := range m.displayToServer {
+		m.displayToServer[i] = i
+	}
+
+	row := m.renderOpponents(s)
+	fmt.Println("\n=== All-players row: width=100, self=pos2, active=pos3 ===")
+	fmt.Println(row)
+
+	// Assertions: all four players appear in order, self is marked, active is marked.
+	for _, want := range []string{"1·", "2·", "3·", "4·"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("players row missing position label %q", want)
+		}
+	}
+	if !strings.Contains(row, "(vos)") {
+		t.Error("players row missing '(vos)' self marker")
+	}
+	if !strings.Contains(row, "▶") {
+		t.Error("players row missing '▶' active-turn marker")
+	}
+	// Self (Bob) must appear.
+	if !strings.Contains(row, "Bob") {
+		t.Error("players row missing self player Bob")
+	}
+	// Active (Carlos) must appear.
+	if !strings.Contains(row, "Carlos") {
+		t.Error("players row missing active player Carlos")
+	}
+	if strings.TrimSpace(row) == "" {
+		t.Error("players row is empty")
 	}
 }

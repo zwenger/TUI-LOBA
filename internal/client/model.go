@@ -48,8 +48,16 @@ var (
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("240")).
 				Padding(0, 1)
+	// styleBadgeSelf is used for the self badge when it is NOT the active turn.
+	// A teal/cyan border distinguishes self from other players without conflating
+	// with the yellow thick border reserved for the active-turn player.
+	styleBadgeSelf = lipgloss.NewStyle().
+			Border(lipgloss.DoubleBorder()).
+			BorderForeground(lipgloss.Color("51")).
+			Padding(0, 1)
 	styleBadgeName       = lipgloss.NewStyle().Bold(true)
 	styleBadgeNameActive = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226"))
+	styleBadgeNameSelf   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("51"))
 	styleBadgeDisconnStr = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	styleBadgeChipSep    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 )
@@ -946,11 +954,13 @@ func truncateName(name string, maxLen int) string {
 	return string(runes[:maxLen-1]) + "…"
 }
 
-// renderOpponentBadge renders a multi-line bordered badge for one opponent.
+// renderPlayerBadge renders a multi-line bordered badge for any player, including self.
 // Height is always 3 content lines (name/turn, cards, score+conn) so that
 // lipgloss.JoinHorizontal aligns all badges in a row at the same baseline.
 // pos is the 1-based turn index shown as a position badge prefix.
-func renderOpponentBadge(p protocol.PlayerView, pos int) string {
+// Self is visually distinct: double teal border + "(vos)" suffix. Active-turn
+// styling (thick yellow border + ▶ ◀) applies to whoever is active, self included.
+func renderPlayerBadge(p protocol.PlayerView, pos int) string {
 	name := truncateName(p.Name, 12)
 
 	var posLabel string
@@ -958,9 +968,17 @@ func renderOpponentBadge(p protocol.PlayerView, pos int) string {
 		posLabel = fmt.Sprintf("%d· ", pos)
 	}
 
+	// Build name line. Self gets "(vos)" appended; active gets arrow markers.
+	selfSuffix := ""
+	if p.IsSelf {
+		selfSuffix = " (vos)"
+	}
+
 	var nameLine string
 	if p.IsActive {
-		nameLine = styleBadgeNameActive.Render("▶ "+posLabel+name) + styleActive.Render(" ◀")
+		nameLine = styleBadgeNameActive.Render("▶ "+posLabel+name+selfSuffix) + styleActive.Render(" ◀")
+	} else if p.IsSelf {
+		nameLine = styleBadgeNameSelf.Render("  " + posLabel + name + selfSuffix)
 	} else {
 		nameLine = styleBadgeName.Render("  " + posLabel + name)
 	}
@@ -975,18 +993,29 @@ func renderOpponentBadge(p protocol.PlayerView, pos int) string {
 
 	content := strings.Join([]string{nameLine, cardsLine, scoreLine}, "\n")
 
+	// Border precedence: active (thick yellow) > disconnected (dim) > self (double teal) > normal.
 	if p.IsActive {
 		return styleBadgeActive.Render(content)
 	}
 	if !p.Connected {
 		return styleBadgeDisconn.Render(styleDim.Render(content))
 	}
+	if p.IsSelf {
+		return styleBadgeSelf.Render(content)
+	}
 	return styleBadgeNormal.Render(content)
 }
 
-// renderOpponentChip renders a compact single-line chip for very narrow terminals.
-// pos is the 1-based turn index shown as a prefix.
-func renderOpponentChip(p protocol.PlayerView, pos int) string {
+// renderOpponentBadge is a compatibility shim — delegates to renderPlayerBadge.
+// Kept so that existing callers (score reveal, tests) continue to compile.
+func renderOpponentBadge(p protocol.PlayerView, pos int) string {
+	return renderPlayerBadge(p, pos)
+}
+
+// renderPlayerChip renders a compact single-line chip for any player (self included)
+// at very narrow terminals. pos is the 1-based turn index shown as a prefix.
+// Self gets a "*" marker appended so it stands out without ANSI borders.
+func renderPlayerChip(p protocol.PlayerView, pos int) string {
 	name := truncateName(p.Name, 10)
 	posLabel := ""
 	if pos > 0 {
@@ -996,12 +1025,21 @@ func renderOpponentChip(p protocol.PlayerView, pos int) string {
 	if p.IsActive {
 		turnMark = styleActive.Render("▶")
 	}
+	selfMark := ""
+	if p.IsSelf {
+		selfMark = styleBadgeNameSelf.Render("*")
+	}
 	connMark := ""
 	if !p.Connected {
 		connMark = styleBadgeDisconnStr.Render("✗")
 	}
-	chip := fmt.Sprintf("%s%s%s ♦%d ▸%dpts%s", turnMark, posLabel, name, p.CardCount, p.TotalScore, connMark)
+	chip := fmt.Sprintf("%s%s%s%s ♦%d ▸%dpts%s", turnMark, posLabel, name, selfMark, p.CardCount, p.TotalScore, connMark)
 	return chip
+}
+
+// renderOpponentChip is a compatibility shim — delegates to renderPlayerChip.
+func renderOpponentChip(p protocol.PlayerView, pos int) string {
+	return renderPlayerChip(p, pos)
 }
 
 // wrapBadges lays out a slice of pre-rendered badge strings into rows using
@@ -1037,6 +1075,7 @@ const compactChipWidth = 60
 // order starting from the player after self. Each player's TurnIndex is used;
 // if TurnIndex is zero (old server / snapshot without the field) the slice
 // order from the snapshot is used unchanged.
+// Kept for any callers that still need opponents-only ordering.
 func rotationOrderedOpponents(players []protocol.PlayerView) []protocol.PlayerView {
 	var self protocol.PlayerView
 	selfFound := false
@@ -1071,10 +1110,39 @@ func rotationOrderedOpponents(players []protocol.PlayerView) []protocol.PlayerVi
 	return opponents
 }
 
+// absoluteOrderedPlayers returns all players (self included) sorted by
+// TurnIndex ascending (1, 2, 3, … N). This order is identical for every
+// client, making the turn sequence immediately obvious.
+// If TurnIndex is zero for any player (old server snapshot), the original
+// snapshot order is used unchanged.
+func absoluteOrderedPlayers(players []protocol.PlayerView) []protocol.PlayerView {
+	if len(players) == 0 {
+		return nil
+	}
+	// Check whether TurnIndex is populated.
+	hasIndex := false
+	for _, p := range players {
+		if p.TurnIndex > 0 {
+			hasIndex = true
+			break
+		}
+	}
+	result := make([]protocol.PlayerView, len(players))
+	copy(result, players)
+	if !hasIndex {
+		return result
+	}
+	sort.SliceStable(result, func(a, b int) bool {
+		return result[a].TurnIndex < result[b].TurnIndex
+	})
+	return result
+}
+
 func (m Model) renderOpponents(s *protocol.StateSnapshot) string {
-	opponents := rotationOrderedOpponents(s.Players)
-	if len(opponents) == 0 {
-		return styleDim.Render("Sin oponentes") + "\n"
+	// Show ALL players (self included) in absolute turn order.
+	players := absoluteOrderedPlayers(s.Players)
+	if len(players) == 0 {
+		return styleDim.Render("Sin jugadores") + "\n"
 	}
 
 	termWidth := m.width
@@ -1085,8 +1153,8 @@ func (m Model) renderOpponents(s *protocol.StateSnapshot) string {
 	if termWidth < compactChipWidth {
 		// Compact chip mode: single-line chips separated by " · ", wrapped as whole units.
 		var chips []string
-		for _, p := range opponents {
-			chips = append(chips, renderOpponentChip(p, p.TurnIndex))
+		for _, p := range players {
+			chips = append(chips, renderPlayerChip(p, p.TurnIndex))
 		}
 		sep := styleBadgeChipSep.Render(" · ")
 		// Wrap chips into rows keeping them as whole units.
@@ -1110,9 +1178,9 @@ func (m Model) renderOpponents(s *protocol.StateSnapshot) string {
 	}
 
 	// Full badge mode.
-	badges := make([]string, len(opponents))
-	for i, p := range opponents {
-		badges[i] = renderOpponentBadge(p, p.TurnIndex)
+	badges := make([]string, len(players))
+	for i, p := range players {
+		badges[i] = renderPlayerBadge(p, p.TurnIndex)
 	}
 	return wrapBadges(badges, termWidth, 1) + "\n"
 }
