@@ -20,8 +20,12 @@ import (
 var (
 	styleTitle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213")).Padding(0, 1)
 	styleBox      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	styleRed      = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	styleBlack    = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	// Four-color deck (poker convention): hearts red, diamonds blue,
+	// clubs green, spades white — each suit instantly recognizable.
+	styleHearts   = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	styleDiamonds = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	styleClubs    = lipgloss.NewStyle().Foreground(lipgloss.Color("41"))
+	styleSpades   = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	styleJoker    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("201"))
 	styleActive   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226"))
 	styleDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
@@ -1934,10 +1938,16 @@ func applyCardColor(s string, rank, suit int, pickedUp bool) string {
 	if rank == 0 {
 		return styleJoker.Render(s)
 	}
-	if suit == 1 || suit == 2 { // Hearts, Diamonds
-		return styleRed.Render(s)
+	switch suit {
+	case 1: // Hearts
+		return styleHearts.Render(s)
+	case 2: // Diamonds
+		return styleDiamonds.Render(s)
+	case 3: // Clubs
+		return styleClubs.Render(s)
+	default: // Spades and face-down/neutral
+		return styleSpades.Render(s)
 	}
-	return styleBlack.Render(s)
 }
 
 // renderCardLabel renders a short inline card label (for melds, discard top, etc.)
