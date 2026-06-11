@@ -1,5 +1,9 @@
 # Loba
 
+<p align="center">
+  <img src="assets/tui-loba.jpg" alt="TUI-LOBA — Argentine rummy in your terminal" width="800">
+</p>
+
 A multiplayer Argentine rummy card game playable over TCP in your terminal.
 One player hosts; everyone else joins. No servers to configure, no accounts —
 just build and play.

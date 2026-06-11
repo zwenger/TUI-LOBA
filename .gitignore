@@ -19,3 +19,6 @@ coverage.html
 
 # Agent tooling
 .atl/
+
+# Source art (oversized originals)
+tui-loba.png
