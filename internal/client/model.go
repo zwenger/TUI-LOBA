@@ -1027,25 +1027,31 @@ func (m Model) viewGame() string {
 	var b strings.Builder
 	b.WriteString(header())
 
-	// ── Opponents row ──
-	b.WriteString(m.renderOpponents(s))
-	b.WriteString("\n")
+	// ── Table (opponents, melds, piles, hand) ──
+	// Composed as a single block so every section centers against the same
+	// axis and the layout doesn't wobble when one section changes width.
+	table := lipgloss.JoinVertical(lipgloss.Center,
+		strings.TrimRight(m.renderOpponents(s), "\n"),
+		"",
+		strings.TrimRight(m.renderMelds(s), "\n"),
+		"",
+		renderPiles(s),
+		"",
+		strings.TrimRight(m.renderHand(s), "\n"),
+	)
+	if m.width > 0 {
+		table = lipgloss.PlaceHorizontal(m.width, lipgloss.Center, table)
+	}
+	b.WriteString(table + "\n")
 
-	// ── Melds ──
-	b.WriteString(m.renderMelds(s))
-	b.WriteString("\n")
-
-	// ── Stock / Discard ──
-	b.WriteString(renderPiles(s) + "\n")
-
-	// ── Your hand ──
-	b.WriteString(m.renderHand(s))
-	b.WriteString("\n")
+	// ── Help bar ──
+	// Rendered right after the table so the controls stay anchored below the
+	// hand; the event log grows downward past the bar without pushing it.
+	isMyTurn := s.ActiveID == m.selfID
+	b.WriteString(m.renderHelp(isMyTurn))
 
 	// ── Event log (recent lines) ──
 	// Show up to 3 most recent lines when the terminal is tall enough; otherwise 1.
-	// We need at least ~4 extra lines above the help bar to show 3 (title=1, hand≈6,
-	// melds≈3, piles=4, opponents≈5 → ~19 minimum; 3 extra log lines require h≥22).
 	maxLogLines := 1
 	if m.height >= 26 {
 		maxLogLines = 3
@@ -1062,10 +1068,6 @@ func (m Model) viewGame() string {
 	if m.lastError != "" {
 		b.WriteString(styleErr.Render("✗ "+m.lastError) + "\n")
 	}
-
-	// ── Help bar ──
-	isMyTurn := s.ActiveID == m.selfID
-	b.WriteString(m.renderHelp(isMyTurn))
 
 	return b.String()
 }
