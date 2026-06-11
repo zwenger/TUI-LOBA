@@ -1021,3 +1021,130 @@ func TestTurnIndexPreservedAfterReconnect(t *testing.T) {
 		}
 	}
 }
+
+// ─── Version mismatch tests ───────────────────────────────────────────────────
+
+// startServerWithVersion starts a Server with a specific version set.
+func startServerWithVersion(t *testing.T, serverVersion string) (*Server, string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := New("0", "host")
+	srv.SetVersion(serverVersion)
+	go srv.Serve(ln) //nolint
+	t.Cleanup(func() { ln.Close() })
+	return srv, ln.Addr().String()
+}
+
+// dialAndJoinWithVersion connects to addr, sends a join command with an explicit version,
+// and returns the connection plus a buffered reader.
+func dialAndJoinWithVersion(t *testing.T, addr, name, clientVersion string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	r := bufio.NewReader(conn)
+	cmd := protocol.Command{Type: protocol.CmdJoin, Name: name, Version: clientVersion}
+	if err := protocol.WriteJSON(conn, cmd); err != nil {
+		t.Fatalf("join write: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return conn, r
+}
+
+// readNextLobbyEvent reads lobby envelopes until it finds one containing an
+// event list, and returns all event strings from the state or falls back to
+// reading lobby-embedded events. Since version warnings go to the game event log
+// (only populated once game starts), we detect them by reading game state after
+// game starts.
+func TestVersionMismatchProducesWarning(t *testing.T) {
+	_, addr := startServerWithVersion(t, "1.0.0")
+
+	// Alice joins with matching version — no warning expected.
+	aliceConn, aliceR := dialAndJoinWithVersion(t, addr, "Alice", "1.0.0")
+	drainLobby(t, aliceR)
+
+	// Bob joins with a different version — a warning should be broadcast.
+	bobConn, bobR := dialAndJoinWithVersion(t, addr, "Bob", "2.0.0")
+	_, _ = bobConn, bobR
+	drainLobby(t, aliceR)
+
+	// Start the game so the warning event flows through game state.
+	if err := protocol.WriteJSON(aliceConn, protocol.Command{Type: protocol.CmdStart}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	snap := drainUntilState(t, aliceR)
+
+	// Check the EventLogTail for the version warning.
+	found := false
+	for _, ev := range snap.EventLogTail {
+		if strings.Contains(ev, "atención") && strings.Contains(ev, "Bob") && strings.Contains(ev, "2.0.0") {
+			found = true
+			break
+		}
+	}
+	// The version warning is added before the game starts, so it may be in
+	// the tail or game events; check Events too.
+	if !found {
+		for _, ev := range snap.Events {
+			if strings.Contains(ev, "atención") && strings.Contains(ev, "Bob") {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected version mismatch warning in EventLogTail or Events, got tail=%v events=%v",
+			snap.EventLogTail, snap.Events)
+	}
+}
+
+// TestVersionMatchProducesNoWarning: same versions — no mismatch warning.
+func TestVersionMatchProducesNoWarning(t *testing.T) {
+	_, addr := startServerWithVersion(t, "1.0.0")
+
+	aliceConn, aliceR := dialAndJoinWithVersion(t, addr, "Alice", "1.0.0")
+	drainLobby(t, aliceR)
+
+	bobConn, bobR := dialAndJoinWithVersion(t, addr, "Bob", "1.0.0")
+	_, _ = bobConn, bobR
+	drainLobby(t, aliceR)
+
+	if err := protocol.WriteJSON(aliceConn, protocol.Command{Type: protocol.CmdStart}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	snap := drainUntilState(t, aliceR)
+
+	for _, ev := range snap.EventLogTail {
+		if strings.Contains(ev, "atención") {
+			t.Errorf("unexpected version warning: %s", ev)
+		}
+	}
+}
+
+// TestDevVersionProducesNoWarning: "dev" clients are never warned.
+func TestDevVersionProducesNoWarning(t *testing.T) {
+	_, addr := startServerWithVersion(t, "1.0.0")
+
+	aliceConn, aliceR := dialAndJoinWithVersion(t, addr, "Alice", "1.0.0")
+	drainLobby(t, aliceR)
+
+	// Bob joins with "dev" version — no warning.
+	bobConn, bobR := dialAndJoinWithVersion(t, addr, "Bob", "dev")
+	_, _ = bobConn, bobR
+	drainLobby(t, aliceR)
+
+	if err := protocol.WriteJSON(aliceConn, protocol.Command{Type: protocol.CmdStart}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	snap := drainUntilState(t, aliceR)
+
+	for _, ev := range snap.EventLogTail {
+		if strings.Contains(ev, "atención") {
+			t.Errorf("unexpected version warning for dev client: %s", ev)
+		}
+	}
+}

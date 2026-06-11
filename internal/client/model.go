@@ -141,9 +141,10 @@ type bootstrapErrMsg struct{ err error }
 
 // Model is the Bubbletea model for the Loba client.
 type Model struct {
-	screen screen
-	addr   string
-	name   string // player display name
+	screen  screen
+	addr    string
+	name    string   // player display name
+	version string   // binary version, sent in the join handshake
 
 	// menu (start screen shown when launched with no subcommand)
 	menuCursor    int    // 0=Crear sala 1=Unirse a sala 2=Salir
@@ -155,6 +156,10 @@ type Model struct {
 	// bootstrap callbacks injected by main when launching in menu mode
 	hostBootstrap HostBootstrapFunc
 	joinBootstrap JoinBootstrapFunc
+
+	// updateNotice, when non-empty, is shown as a footer in the start menu.
+	// Set by main after the background version check resolves.
+	updateNotice string
 
 	// fatalError is shown on screenFatalError; user presses Enter to quit.
 	fatalError string
@@ -212,10 +217,11 @@ type Model struct {
 }
 
 // New returns the initial model for a direct host/join launch (CLI subcommand path).
-func New(addr, name string) Model {
+func New(addr, name, ver string) Model {
 	m := Model{
 		addr:     addr,
 		name:     name,
+		version:  ver,
 		selected: make(map[int]bool),
 		// Always start connecting immediately; if name is empty we show the name
 		// screen only after the server asks for one (EvtNameRequired). For a started
@@ -228,12 +234,13 @@ func New(addr, name string) Model {
 // NewMenu returns the initial model for an interactive (no-args) launch.
 // The caller must inject hostBootstrap and joinBootstrap so the menu can
 // trigger the same bootstrap logic as the CLI subcommands.
-func NewMenu(hostFn HostBootstrapFunc, joinFn JoinBootstrapFunc) Model {
+func NewMenu(hostFn HostBootstrapFunc, joinFn JoinBootstrapFunc, ver string) Model {
 	return Model{
 		screen:        screenMenu,
 		selected:      make(map[int]bool),
 		hostBootstrap: hostFn,
 		joinBootstrap: joinFn,
+		version:       ver,
 	}
 }
 
@@ -246,6 +253,19 @@ func NewFatalError(msg string) Model {
 		selected:   make(map[int]bool),
 	}
 }
+
+// SetUpdateNotice sets the update notice text shown in the start menu footer.
+// It is safe to call from a goroutine after the model has been created.
+// The TUI model is immutable (value receiver) so callers must trigger a re-render
+// by sending an UpdateNoticeMsg to the running tea.Program.
+func SetUpdateNotice(m Model, notice string) Model {
+	m.updateNotice = notice
+	return m
+}
+
+// UpdateNoticeMsg is a tea.Msg sent to the running program when a newer version
+// is detected so the menu footer can be updated without blocking startup.
+type UpdateNoticeMsg struct{ Version string }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
@@ -267,6 +287,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		return m, nil
+
+	case UpdateNoticeMsg:
+		m.updateNotice = msg.Version
 		return m, nil
 
 	case bootstrapHostMsg:
@@ -292,7 +316,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reader = bufio.NewReader(msg.conn)
 		// Send join command with whatever name we have (may be empty for lobby path
 		// without --name; the server will ask for one via EvtNameRequired).
-		cmd := protocol.Command{Type: protocol.CmdJoin, Name: m.name}
+		cmd := protocol.Command{Type: protocol.CmdJoin, Name: m.name, Version: m.version}
 		_ = protocol.WriteJSON(m.conn, cmd)
 		return m, readServerMsg(m.reader)
 
@@ -463,7 +487,7 @@ func (m Model) handleNameKey(key string) (tea.Model, tea.Cmd) {
 		// We are already connected (server prompted for our name). Send the join
 		// command with the chosen name; the server will register and send lobby state.
 		if m.conn != nil {
-			_ = protocol.WriteJSON(m.conn, protocol.Command{Type: protocol.CmdJoin, Name: m.name})
+			_ = protocol.WriteJSON(m.conn, protocol.Command{Type: protocol.CmdJoin, Name: m.name, Version: m.version})
 		}
 		return m, nil
 	case "backspace":

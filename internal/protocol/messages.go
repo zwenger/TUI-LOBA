@@ -29,7 +29,8 @@ type Command struct {
 	Type string `json:"type"`
 
 	// join
-	Name string `json:"name,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version,omitempty"` // client version, sent with CmdJoin
 
 	// claim_seat
 	SeatID string `json:"seat_id,omitempty"`

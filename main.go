@@ -14,7 +14,9 @@ import (
 	"github.com/zwenger/TUI-LOBA/internal/client"
 	"github.com/zwenger/TUI-LOBA/internal/server"
 	"github.com/zwenger/TUI-LOBA/internal/tunnel"
+	"github.com/zwenger/TUI-LOBA/internal/update"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -47,9 +49,13 @@ func main() {
 	case "--version", "-version", "version":
 		fmt.Println("loba", version)
 	case "host":
+		printUpdateNoticeIfNewer()
 		runHost(args)
 	case "join":
+		printUpdateNoticeIfNewer()
 		runJoin(args)
+	case "update":
+		runUpdate()
 	default:
 		usage()
 		windowsPause()
@@ -63,11 +69,116 @@ func usage() {
 Usage:
   loba host [--port 7777] [--name YourName] [--public]   Start a game server and join as host
   loba join <host:port> [--name YourName]                Join an existing game
+  loba update                                            Update loba to the latest release
   loba                                                   Interactive start menu
 
 Flags (host):
   --public   Open a public TCP tunnel via bore.pub so friends can join from
              anywhere. No account or token required.`)
+}
+
+// ─── Version update notice ────────────────────────────────────────────────────
+
+// updateNoticeCh receives a newer version string when the background check finishes.
+var updateNoticeCh = make(chan string, 1)
+
+// checkUpdateBackground fires a goroutine that checks for a newer version and
+// sends it to updateNoticeCh. Safe to call from the menu init path.
+func checkUpdateBackground() {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		latest, err := update.LatestVersion(ctx)
+		if err != nil {
+			return
+		}
+		if update.IsNewer(version, latest) {
+			select {
+			case updateNoticeCh <- latest:
+			default:
+			}
+		}
+	}()
+}
+
+// printUpdateNoticeIfNewer performs a synchronous (2 s timeout) version check
+// and prints a notice to stderr when a newer version is available.
+// Used by the host/join CLI paths before the TUI starts.
+// Silent on any error or timeout.
+func printUpdateNoticeIfNewer() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	latest, err := update.LatestVersion(ctx)
+	if err != nil {
+		return
+	}
+	if update.IsNewer(version, latest) {
+		fmt.Fprintf(os.Stderr, "Hay una versión nueva (v%s) — actualizá con: loba update\n", latest)
+	}
+}
+
+// ─── loba update subcommand ───────────────────────────────────────────────────
+
+func runUpdate() {
+	fmt.Printf("loba %s\n", version)
+
+	if version == "dev" {
+		fmt.Fprintln(os.Stderr, "instalación desde código — actualizá con play.sh o git pull")
+		os.Exit(0)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	fmt.Println("Verificando última versión...")
+	rel, err := update.LatestRelease(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error consultando GitHub: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !update.IsNewer(version, rel.TagName) {
+		fmt.Printf("Ya estás en la última versión (v%s).\n", rel.TagName)
+		os.Exit(0)
+	}
+
+	exePath, err := update.ResolveExePath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "No se pudo determinar la ruta del ejecutable: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Check write permission early — provide actionable error.
+	dir := filepath.Dir(exePath)
+	if err := checkWritable(dir); err != nil {
+		fmt.Fprintf(os.Stderr, "Sin permiso de escritura en %s.\n", dir)
+		if strings.HasPrefix(dir, "/usr/") || strings.HasPrefix(dir, "/opt/") {
+			fmt.Fprintln(os.Stderr, "Intentá ejecutar con: sudo loba update")
+		}
+		os.Exit(1)
+	}
+
+	oldVersion := version
+	err = update.SelfUpdate(ctx, rel, version, exePath, "", func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error actualizando: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("loba actualizado: v%s → v%s\n", oldVersion, rel.TagName)
+}
+
+// checkWritable returns an error if dir is not writable by the current process.
+func checkWritable(dir string) error {
+	tmp, err := os.CreateTemp(dir, ".loba-write-check-*")
+	if err != nil {
+		return err
+	}
+	_ = tmp.Close()
+	_ = os.Remove(tmp.Name())
+	return nil
 }
 
 // windowsPause waits for Enter on Windows so a double-clicked console window
@@ -93,6 +204,9 @@ type menuState struct {
 }
 
 func runMenu() {
+	// Start background version check; notice will be shown in the TUI footer.
+	checkUpdateBackground()
+
 	ms := &menuState{}
 
 	hostFn := func(port string, public bool, progCh chan<- *tea.Program) (string, error) {
@@ -117,8 +231,18 @@ func runMenu() {
 		return normaliseAddr(addr)
 	}
 
-	m := client.NewMenu(hostFn, joinFn)
+	m := client.NewMenu(hostFn, joinFn, version)
 	p := tea.NewProgram(m, tea.WithAltScreen())
+
+	// Forward update notice to the running TUI when the background check finishes.
+	go func() {
+		select {
+		case latest := <-updateNoticeCh:
+			p.Send(client.UpdateNoticeMsg{Version: latest})
+		case <-time.After(5 * time.Second):
+			// Don't keep this goroutine alive indefinitely if the check is slow.
+		}
+	}()
 
 	// This goroutine waits until the host bootstrap has set ms.srv, then
 	// launches the tunnel goroutine with p injected into the channel.
@@ -170,7 +294,7 @@ func runHost(args []string) {
 		return
 	}
 
-	m := client.New(localAddr, *name)
+	m := client.New(localAddr, *name, version)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	if *public {
@@ -203,7 +327,7 @@ func runJoin(args []string) {
 	name := fs.String("name", "", "Your display name")
 	_ = fs.Parse(remaining)
 
-	m := client.New(addr, *name)
+	m := client.New(addr, *name, version)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
@@ -219,6 +343,7 @@ func runJoin(args []string) {
 // It waits up to 200 ms for the listener to bind and checks for early failures.
 func startServer(port, name string) (*server.Server, string, error) {
 	srv := server.New(port, name)
+	srv.SetVersion(version)
 	errCh := make(chan error, 1)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {

@@ -204,6 +204,12 @@ func (m Model) viewMenuMain() string {
 		helpEntry{"Enter", "elegir"},
 		helpEntry{"Q", "salir"},
 	))
+	if m.updateNotice != "" {
+		b.WriteString("\n")
+		b.WriteString(styleDim.Render(
+			"Hay una versión nueva (v" + m.updateNotice + ") — actualizá con: loba update",
+		))
+	}
 	return b.String()
 }
 

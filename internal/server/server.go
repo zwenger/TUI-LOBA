@@ -29,7 +29,9 @@ type Server struct {
 	started  bool
 	port     string
 	hostName string
-	publicAddr string // bore.pub public address, empty when --public is not used
+	version      string   // server binary version, set via New
+	publicAddr   string   // bore.pub public address, empty when --public is not used
+	pendingEvents []string // events to flush into the game once it starts
 }
 
 // pending represents a connection that has joined a started game and is in the
@@ -58,11 +60,19 @@ type client struct {
 // New creates a new server that will listen on the given port.
 func New(port, hostName string) *Server {
 	return &Server{
-		clients: make(map[string]*client),
-		pending: make(map[string]*pending),
-		port:    port,
+		clients:  make(map[string]*client),
+		pending:  make(map[string]*pending),
+		port:     port,
 		hostName: hostName,
 	}
+}
+
+// SetVersion records the server's own binary version so it can compare with
+// joining clients. Call this once from main before starting to serve.
+func (s *Server) SetVersion(v string) {
+	s.mu.Lock()
+	s.version = v
+	s.mu.Unlock()
 }
 
 // SetPublicAddr stores the bore.pub public address so it is included in lobby
@@ -169,6 +179,26 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 
 	log.Printf("[server] %s joined as %s", conn.RemoteAddr(), name)
+
+	// Version mismatch warning: if both are non-"dev" and differ, queue a warning event.
+	// If a game is already running, add it immediately. Otherwise, enqueue it to be
+	// flushed into the game's event log when the game starts.
+	s.mu.Lock()
+	srvVer := s.version
+	s.mu.Unlock()
+	clientVer := strings.TrimPrefix(cmd.Version, "v")
+	if srvVer != "" && srvVer != "dev" && clientVer != "" && clientVer != "dev" && srvVer != clientVer {
+		warnMsg := fmt.Sprintf("atención: %s usa v%s y el anfitrión v%s — conviene que ambos actualicen a la última versión",
+			name, clientVer, srvVer)
+		s.mu.Lock()
+		if s.game != nil {
+			s.game.AddEvent(warnMsg)
+		} else {
+			s.pendingEvents = append(s.pendingEvents, warnMsg)
+		}
+		s.mu.Unlock()
+		log.Printf("[server] version mismatch: client=%s server=%s", clientVer, srvVer)
+	}
 
 	// Start the outbound writer goroutine.
 	s.mu.Lock()
@@ -650,6 +680,13 @@ func (s *Server) handleStart(playerID string) {
 	}
 	s.started = true
 	log.Printf("[server] Game started with %d players", len(players))
+
+	// Flush any pending events (e.g. version mismatch warnings from the lobby phase).
+	for _, ev := range s.pendingEvents {
+		s.game.AddEvent(ev)
+	}
+	s.pendingEvents = nil
+
 	s.broadcastStateLocked()
 	s.scheduleAutoPlayLocked()
 }

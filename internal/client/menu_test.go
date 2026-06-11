@@ -24,7 +24,7 @@ func noopJoinFn(addr string) (string, error) {
 
 // newMenuModel returns a Model on the menu screen with no-op bootstrap funcs.
 func newMenuModel() Model {
-	return NewMenu(noopHostFn, noopJoinFn)
+	return NewMenu(noopHostFn, noopJoinFn, "dev")
 }
 
 // sendMenuKey sends a single key to handleMenuKey and returns the updated model.
@@ -253,7 +253,7 @@ func TestJoinBootstrapCmdProducesErrMsg(t *testing.T) {
 	errFn := func(addr string) (string, error) {
 		return "", errors.New("dirección inválida")
 	}
-	m := NewMenu(noopHostFn, errFn)
+	m := NewMenu(noopHostFn, errFn, "dev")
 	m = sendMenuKeys(m, "down", "enter")
 	for _, ch := range "bad" {
 		m = sendMenuKey(m, string(ch))
