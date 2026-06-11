@@ -199,7 +199,11 @@ func (m Model) viewMenuMain() string {
 	}
 	b.WriteString(styleMenuBox.Render(items.String()))
 	b.WriteString("\n\n")
-	b.WriteString(styleHelp.Render("↑ ↓ / k j: mover   Enter: elegir   Q: salir"))
+	b.WriteString(helpBar(
+		helpEntry{"↑↓ / k j", "mover"},
+		helpEntry{"Enter", "elegir"},
+		helpEntry{"Q", "salir"},
+	))
 	return b.String()
 }
 
@@ -215,7 +219,11 @@ func (m Model) viewMenuHost() string {
 	}
 	b.WriteString(styleDim.Render("  Puerto: 7777 (por defecto)") + "\n")
 	b.WriteString("\n")
-	b.WriteString(styleHelp.Render("T: alternar túnel   Enter: iniciar sala   Esc: volver"))
+	b.WriteString(helpBar(
+		helpEntry{"T", "alternar túnel"},
+		helpEntry{"Enter", "iniciar sala"},
+		helpEntry{"Esc", "volver"},
+	))
 	return b.String()
 }
 
@@ -228,7 +236,10 @@ func (m Model) viewMenuJoin() string {
 		b.WriteString("\n  " + styleErr.Render(m.menuAddrErr) + "\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(styleHelp.Render("Enter: conectar   Esc: volver"))
+	b.WriteString(helpBar(
+		helpEntry{"Enter", "conectar"},
+		helpEntry{"Esc", "volver"},
+	))
 	return b.String()
 }
 
@@ -241,7 +252,7 @@ func (m Model) viewFatalError() string {
 	b.WriteString(styleBox.Render(
 		styleErr.Render("Error:")+"\n\n"+
 			m.fatalError+"\n\n"+
-			styleHelp.Render("Presioná Enter para salir"),
+			helpBar(helpEntry{"Enter", "salir"}),
 	))
 	return b.String()
 }

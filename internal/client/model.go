@@ -883,7 +883,7 @@ func (m Model) viewNameEntry() string {
 	b.WriteString(styleBox.Render(
 		"Ingresá tu nombre:\n\n" +
 			styleInput.Render(m.nameInput+"█") + "\n\n" +
-			styleHelp.Render("Presioná Enter para confirmar"),
+			helpBar(helpEntry{"Enter", "confirmar"}),
 	))
 	if m.nameErr != "" {
 		b.WriteString("\n" + styleErr.Render(m.nameErr))
@@ -941,17 +941,20 @@ func (m Model) viewLobby() string {
 	}
 
 	players := strings.Join(m.lobbyPlayers, "\n  ")
-	content := fmt.Sprintf("  Jugadores conectados (%d/6):\n  %s\n\n  %s",
+	hostHint := "  Anfitrión: presioná " +
+		styleHelpKey.Render("S") + " " + styleHelpDesc.Render("o") + " " +
+		styleHelpKey.Render("Enter") + " " + styleHelpDesc.Render("para comenzar")
+	content := fmt.Sprintf("  Jugadores conectados (%d/6):\n  %s\n\n%s",
 		len(m.lobbyPlayers),
 		players,
-		styleHelp.Render("Anfitrión: presioná S o Enter para comenzar"),
+		hostHint,
 	)
 	b.WriteString(styleBox.Render(content))
 
 	if m.lastError != "" {
 		b.WriteString("\n" + styleErr.Render(m.lastError))
 	}
-	b.WriteString("\n\n" + styleHelp.Render("Esperando que el anfitrión inicie la partida..."))
+	b.WriteString("\n\n" + styleHelpDesc.Render("Esperando que el anfitrión inicie la partida..."))
 	return b.String()
 }
 
@@ -977,7 +980,11 @@ func (m Model) viewSeats() string {
 		}
 	}
 
-	b.WriteString("\n" + styleHelp.Render("↑ ↓ / k j: mover   Enter: elegir   Esc/Q: salir"))
+	b.WriteString("\n" + helpBar(
+		helpEntry{"↑↓ / k j", "mover"},
+		helpEntry{"Enter", "elegir"},
+		helpEntry{"Esc/Q", "salir"},
+	))
 
 	if m.lastError != "" {
 		b.WriteString("\n" + styleErr.Render(m.lastError))
@@ -1389,11 +1396,19 @@ func (m Model) renderHand(s *protocol.StateSnapshot) string {
 }
 
 func (m Model) renderHelp(isMyTurn bool) string {
-	sortLabel := styleDim.Render("[S: " + m.sortMode.String() + "]")
-	overlayHints := styleDim.Render("  P:puntajes  Shift+L:log")
+	// Sort mode suffix: shows current sort name alongside the S key hint.
+	sortLabel := styleHelpSep.Render(" · ") + styleHelpKey.Render("S") + " " + styleHelpDesc.Render(m.sortMode.String())
+
+	// Overlay shortcuts appended to every bar.
+	overlaySuffix := styleHelpSep.Render(" · ") +
+		styleHelpKey.Render("P") + " " + styleHelpDesc.Render("puntajes") +
+		styleHelpSep.Render(" · ") +
+		styleHelpKey.Render("Shift+L") + " " + styleHelpDesc.Render("log")
+
+	// Picked-up discard warning (keeps its own orange style for urgency).
 	pickedNote := ""
 	if m.state != nil && m.state.PickedUpDiscard != nil {
-		pickedNote = stylePickedUp.Render("  [★ debés jugar " + m.state.PickedUpDiscard.Label + " antes de descartar]")
+		pickedNote = " " + stylePickedUp.Render("[★ debés jugar "+m.state.PickedUpDiscard.Label+" antes de descartar]")
 	}
 
 	// "siguiente" hint: show who plays after the current active player.
@@ -1411,22 +1426,43 @@ func (m Model) renderHelp(isMyTurn bool) string {
 			}
 		}
 		if nextName != "" {
-			nextHint = styleDim.Render("  siguiente: " + nextName)
+			nextHint = styleHelpSep.Render(" · ") + styleHelpDesc.Render("siguiente: "+nextName)
 		}
 	}
 
 	if !isMyTurn {
-		return styleHelp.Render("← →/h l: mover cursor  Espacio: seleccionar  S: ordenar  (esperando)") + " " + sortLabel + overlayHints + nextHint + pickedNote + "\n"
+		bar := helpBar(
+			helpEntry{"← →/h l", "mover cursor"},
+			helpEntry{"Espacio", "seleccionar"},
+			helpEntry{"S", "ordenar"},
+		) + styleHelpSep.Render(" · ") + styleHelpDesc.Render("(esperando)") +
+			sortLabel + overlaySuffix + nextHint + pickedNote
+		return bar + "\n"
 	}
+
 	phase := ""
 	if m.state != nil {
 		phase = m.state.Phase
 	}
 	switch phase {
 	case "draw":
-		return styleHelp.Render("D: robar del mazo  T: tomar del pozo  S: ordenar") + " " + sortLabel + overlayHints + nextHint + "\n"
+		bar := helpBar(
+			helpEntry{"D", "robar del mazo"},
+			helpEntry{"T", "tomar del pozo"},
+			helpEntry{"S", "ordenar"},
+		) + sortLabel + overlaySuffix + nextHint
+		return bar + "\n"
 	default:
-		return styleHelp.Render("Espacio: seleccionar  M: pierna  E: escalera  1-9: agregar en comb.#N  X: descartar  S: ordenar  Esc: limpiar") + " " + sortLabel + overlayHints + nextHint + pickedNote + "\n"
+		bar := helpBar(
+			helpEntry{"Espacio", "seleccionar"},
+			helpEntry{"M", "pierna"},
+			helpEntry{"E", "escalera"},
+			helpEntry{"1-9", "agregar en comb.#N"},
+			helpEntry{"X", "descartar"},
+			helpEntry{"S", "ordenar"},
+			helpEntry{"Esc", "limpiar"},
+		) + sortLabel + overlaySuffix + nextHint + pickedNote
+		return bar + "\n"
 	}
 }
 
@@ -1542,7 +1578,12 @@ func (m Model) viewRoundSummary() string {
 		}
 	}
 
-	b.WriteString("\n" + styleHelp.Render("Enter / N: siguiente ronda  ·  P: puntajes  ·  L: log  ·  Q: salir"))
+	b.WriteString("\n" + helpBar(
+		helpEntry{"Enter / N", "siguiente ronda"},
+		helpEntry{"P", "puntajes"},
+		helpEntry{"L", "log"},
+		helpEntry{"Q", "salir"},
+	))
 	return b.String()
 }
 
@@ -1604,7 +1645,7 @@ func (m Model) viewGameOver() string {
 		}
 	}
 
-	b.WriteString("\n" + styleHelp.Render("Q: salir"))
+	b.WriteString("\n" + helpBar(helpEntry{"Q", "salir"}))
 	return b.String()
 }
 
@@ -1621,7 +1662,7 @@ func (m Model) viewScoreTable() string {
 
 	if m.state == nil || len(m.state.ScoreHistory) == 0 {
 		b.WriteString(styleDim.Render("  (todavía no se completó ninguna ronda)") + "\n")
-		b.WriteString("\n" + styleHelp.Render("P / Esc: volver"))
+		b.WriteString("\n" + helpBar(helpEntry{"P / Esc", "volver"}))
 		return b.String()
 	}
 
@@ -1720,7 +1761,10 @@ func (m Model) viewScoreTable() string {
 	}
 	b.WriteString(styleBadgeName.Render(totalRow) + "\n")
 
-	b.WriteString("\n" + styleHelp.Render("P / Esc: volver  ·  L: historial"))
+	b.WriteString("\n" + helpBar(
+		helpEntry{"P / Esc", "volver"},
+		helpEntry{"L", "historial"},
+	))
 	return b.String()
 }
 
@@ -1772,7 +1816,13 @@ func (m Model) viewEventLog() string {
 		}
 	}
 
-	b.WriteString("\n" + styleHelp.Render("↑/k: arriba  ↓/j: abajo  PgUp/PgDn: página  L / Esc: volver  P: puntajes"))
+	b.WriteString("\n" + helpBar(
+		helpEntry{"↑/k", "arriba"},
+		helpEntry{"↓/j", "abajo"},
+		helpEntry{"PgUp/PgDn", "página"},
+		helpEntry{"L / Esc", "volver"},
+		helpEntry{"P", "puntajes"},
+	))
 	return b.String()
 }
 
