@@ -16,6 +16,7 @@ import (
 	"github.com/zwenger/TUI-LOBA/internal/tunnel"
 	"github.com/zwenger/TUI-LOBA/internal/update"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -353,10 +354,50 @@ func startServer(port, name string) (*server.Server, string, error) {
 	// Give the server time to bind; check for early failure.
 	select {
 	case err := <-errCh:
-		return nil, "", fmt.Errorf("no se pudo iniciar el servidor en el puerto %s: %w", port, err)
+		msg := fmt.Sprintf("no se pudo iniciar el servidor en el puerto %s: %v", port, err)
+		if hint := diagnosePortOwner(port); hint != "" {
+			msg += "\n\n" + hint
+		}
+		return nil, "", fmt.Errorf("%s", msg)
 	case <-time.After(200 * time.Millisecond):
 	}
 	return srv, "localhost:" + port, nil
+}
+
+// diagnosePortOwner inspects which process is listening on the given TCP port
+// and returns a human-readable hint, or "" when nothing could be determined.
+// Uses lsof, so it is a no-op on Windows.
+func diagnosePortOwner(port string) string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	out, err := exec.Command("lsof", "-ti", "tcp:"+port, "-sTCP:LISTEN").Output()
+	if err != nil {
+		return ""
+	}
+	pid := strings.TrimSpace(string(out))
+	if pid == "" {
+		return ""
+	}
+	if i := strings.IndexByte(pid, '\n'); i >= 0 {
+		pid = pid[:i] // multiple PIDs: report the first listener
+	}
+
+	comm := ""
+	if cout, cerr := exec.Command("ps", "-o", "comm=", "-p", pid).Output(); cerr == nil {
+		// ps reports the full executable path on macOS; show just the name.
+		comm = filepath.Base(strings.TrimSpace(string(cout)))
+	}
+
+	if strings.Contains(comm, "loba") {
+		return fmt.Sprintf(
+			"Hay una instancia previa de Loba corriendo (PID %s) que quedó con el puerto.\n"+
+				"Cerrala con:  kill %s", pid, pid)
+	}
+	if comm != "" {
+		return fmt.Sprintf("El puerto %s está ocupado por %q (PID %s).", port, comm, pid)
+	}
+	return fmt.Sprintf("El puerto %s está ocupado por el proceso PID %s.", port, pid)
 }
 
 // normaliseAddr returns addr unchanged if it contains a colon (host:port),
