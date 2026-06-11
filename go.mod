@@ -1,4 +1,4 @@
-module loba
+module github.com/zwenger/TUI-LOBA
 
 go 1.26.4
 

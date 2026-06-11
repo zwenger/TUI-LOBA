@@ -78,56 +78,66 @@ Scores accumulate across rounds. When **any** player's cumulative total exceeds
 
 ---
 
-## Quick start (recommended)
+## Install (stable)
 
-Clone the repo once — `play.sh` keeps it up to date automatically:
+### One-liner (macOS / Linux)
 
 ```sh
-git clone <repo>
-cd loba
-./play.sh host --name Alvaro          # host a game
+curl -sL https://raw.githubusercontent.com/zwenger/TUI-LOBA/main/install.sh | sh
+```
+
+Downloads the latest tagged release, verifies the SHA-256 checksum, and
+installs `loba` to `/usr/local/bin` (or `~/.local/bin` if not writable).
+No Go installation required.
+
+### Windows
+
+Download the `.zip` archive for your platform from the
+[releases page](https://github.com/zwenger/TUI-LOBA/releases), extract
+the binary, and place it somewhere on your `PATH`. Or use the dev channel
+below — it requires no manual download and always runs the latest code.
+
+### go install (requires Go 1.21+)
+
+```sh
+go install github.com/zwenger/TUI-LOBA@latest
+```
+
+---
+
+## Run from source (dev channel — auto-updates)
+
+Clone the repo once — `play.sh` / `play.ps1` keep it up to date on every run:
+
+```sh
+git clone https://github.com/zwenger/TUI-LOBA
+cd TUI-LOBA
+./play.sh host --name Alvaro                    # host a game
 ./play.sh join 192.168.1.42:7777 --name Pablo   # join a game
 ```
 
 `play.sh` runs `git pull --ff-only`, rebuilds the binary, then launches it.
-If the pull fails (offline or diverged), it prints a Spanish warning and
-continues with the current build. If the build fails it aborts with a clear
-message.
+If the pull fails (offline or diverged), it prints a warning and continues
+with the current build. If the build fails it aborts with a clear message.
 
-Requires **Go 1.21+** installed (tested on Go 1.26).
+Requires **Go 1.21+** and **Git** installed.
 
-**Windows users:** use `play.ps1` from PowerShell (requires Go and Git):
+**Windows users** — use `play.ps1` from PowerShell:
 
 ```powershell
 .\play.ps1 host --name Alvaro
 .\play.ps1 join <host:port> --name Pablo
 ```
 
-Git Bash users can also run the same `./play.sh` invocation as on Linux/macOS.
-
-### Alternative: pre-built binaries
-
-Download a binary from the releases page and run it directly — no Go
-installation needed.
-
-**Double-clicking `loba.exe` on Windows** (or `loba` on macOS Finder) opens
-the interactive start menu — no terminal command required. Use the arrow keys
-to choose "Crear sala" or "Unirse a sala" and press Enter.
-
-CLI subcommands still work exactly as before:
-
-```sh
-./loba host --port 7777 --name Alvaro
-./loba join 192.168.1.42:7777 --name Pablo
-```
+Git Bash users can also run `./play.sh` exactly as on Linux/macOS.
 
 ---
 
 ## Build manually
 
 ```sh
-git clone <repo>
-cd loba
+git clone https://github.com/zwenger/TUI-LOBA
+cd TUI-LOBA
 go build -o loba .
 ```
 

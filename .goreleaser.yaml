@@ -1,0 +1,77 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: loba
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: loba
+    main: .
+    binary: loba
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Exclude windows/arm64 — no meaningful install path there.
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: loba-archive
+    ids:
+      - loba
+    # tar.gz for unix; zip for windows (format_overrides below).
+    formats:
+      - tar.gz
+    name_template: "loba_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - REGLAS.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - title: "New Features"
+      regexp: "^feat"
+      order: 0
+    - title: "Bug Fixes"
+      regexp: "^fix"
+      order: 1
+    - title: "Other Changes"
+      order: 999
+
+release:
+  github:
+    owner: zwenger
+    name: TUI-LOBA
+  prerelease: auto
+  make_latest: true
+  name_template: "v{{ .Version }}"

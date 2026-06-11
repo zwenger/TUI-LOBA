@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"loba/internal/tunnel"
+	"github.com/zwenger/TUI-LOBA/internal/tunnel"
 
 	"github.com/google/uuid"
 )

@@ -5,7 +5,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"loba/internal/protocol"
+	"github.com/zwenger/TUI-LOBA/internal/protocol"
 	"net"
 	"sort"
 	"strings"

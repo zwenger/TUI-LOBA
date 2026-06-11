@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"testing"
 
-	"loba/internal/protocol"
+	"github.com/zwenger/TUI-LOBA/internal/protocol"
 )
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

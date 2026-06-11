@@ -3,8 +3,8 @@ package server
 import (
 	"bufio"
 	"encoding/json"
-	"loba/internal/game"
-	"loba/internal/protocol"
+	"github.com/zwenger/TUI-LOBA/internal/game"
+	"github.com/zwenger/TUI-LOBA/internal/protocol"
 	"net"
 	"strings"
 	"testing"

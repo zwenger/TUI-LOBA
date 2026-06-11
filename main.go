@@ -11,9 +11,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"loba/internal/client"
-	"loba/internal/server"
-	"loba/internal/tunnel"
+	"github.com/zwenger/TUI-LOBA/internal/client"
+	"github.com/zwenger/TUI-LOBA/internal/server"
+	"github.com/zwenger/TUI-LOBA/internal/tunnel"
 	"os"
 	"runtime"
 	"strings"
@@ -28,6 +28,10 @@ const defaultPort = "7777"
 // repoURL is the canonical clone URL shown in the share block.
 const repoURL = "https://github.com/zwenger/TUI-LOBA"
 
+// version is injected at build time via -ldflags "-X main.version=<tag>".
+// Falls back to "dev" for local / untagged builds.
+var version = "dev"
+
 // ─── Startup decision ─────────────────────────────────────────────────────────
 
 func main() {
@@ -40,6 +44,8 @@ func main() {
 	args := os.Args[2:]
 
 	switch cmd {
+	case "--version", "-version", "version":
+		fmt.Println("loba", version)
 	case "host":
 		runHost(args)
 	case "join":
