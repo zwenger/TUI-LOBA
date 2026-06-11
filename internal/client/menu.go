@@ -10,6 +10,16 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// minArtWidth is the terminal width below which we skip the big art entirely.
+const minArtWidth = 60
+
+// minArtHeight is the terminal height below which we skip the big art entirely.
+const minArtHeight = 24
+
+// sideBySideWidth is the terminal width at or above which title and wolf are
+// placed side-by-side (JoinHorizontal); below it they stack vertically.
+const sideBySideWidth = 90
+
 // Menu item indices.
 const (
 	menuItemHost = 0
@@ -157,96 +167,172 @@ func runJoinBootstrap(fn JoinBootstrapFunc, addr string) tea.Cmd {
 	}
 }
 
-// ─── Menu view ────────────────────────────────────────────────────────────────
+// ─── Menu styles ──────────────────────────────────────────────────────────────
 
 var (
-	styleMenuSel  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226"))
-	styleMenuItem = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	styleMenuBox  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("213")).Padding(1, 3)
+	styleMenuSel   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226"))
+	styleMenuItem  = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	styleMenuPanel = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("213")).
+			Padding(1, 2)
 	styleToggleOn  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("46"))
 	styleToggleOff = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	stylePanelTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213"))
 )
 
-func (m Model) viewMenu() string {
-	var b strings.Builder
-	b.WriteString(header())
-	b.WriteString("\n")
+// ─── Menu view ────────────────────────────────────────────────────────────────
 
+// viewMenu renders the full start-menu screen.
+// Wide/tall terminals: compact header (wordmark + hot dog side-by-side) + panel.
+// Narrow/short terminals: single-line text header + panel.
+func (m Model) viewMenu() string {
+	useArt := m.width >= minArtWidth && m.height >= minArtHeight
+
+	var content strings.Builder
+	if useArt {
+		content.WriteString(m.viewMenuArtHeader())
+	} else {
+		content.WriteString(header())
+		content.WriteString("\n")
+	}
+
+	// Screen panel — same border style for all sub-screens.
+	var panel string
 	switch m.menuSubScreen {
 	case menuSubMain:
-		b.WriteString(m.viewMenuMain())
+		panel = m.viewMenuMainPanel(useArt)
 	case menuSubHost:
-		b.WriteString(m.viewMenuHost())
+		panel = m.viewMenuHostPanel()
 	case menuSubJoin:
-		b.WriteString(m.viewMenuJoin())
+		panel = m.viewMenuJoinPanel()
 	}
-	return b.String()
+	content.WriteString(panel)
+
+	// Update notice — dim, placed below the panel.
+	if m.updateNotice != "" {
+		content.WriteString("\n")
+		content.WriteString(styleDim.Render(
+			"nueva versión disponible: v" + m.updateNotice + " — loba update",
+		))
+	}
+
+	raw := content.String()
+
+	// Horizontal centering when we know the terminal width.
+	if m.width > 0 {
+		return lipgloss.Place(m.width, 0, lipgloss.Center, lipgloss.Top, raw)
+	}
+	return raw
 }
 
-func (m Model) viewMenuMain() string {
-	var b strings.Builder
+// viewMenuArtHeader builds the compact retro banner:
+//
+//	[LOBA wordmark + subtitle]   [hot dog]
+//
+// The wordmark block (5 rows + 1 subtitle row = 6 rows) is vertically centered
+// inside the hot dog height (12 rows) using JoinHorizontal(Center).
+// Total header height: 12 rows + 1 blank separator = 13 rows.
+func (m Model) viewMenuArtHeader() string {
+	// Left column: wordmark (5 rows) + subtitle (1 row).
+	wordmark := renderLobaWordmark()
+	subtitle := styleDim.Render("rummy argentino")
+	leftCol := lipgloss.JoinVertical(lipgloss.Left, wordmark, subtitle)
 
-	var items strings.Builder
+	// Right column: hot dog (12 rows).
+	hotdog := renderHotDog()
+
+	// Join side-by-side, center-aligned vertically, 3-space gap.
+	banner := lipgloss.JoinHorizontal(lipgloss.Center, leftCol, "   ", hotdog)
+
+	return banner + "\n"
+}
+
+// viewMenuMain delegates to viewMenuMainPanel for callers (including tests)
+// that need the main-screen content directly.
+func (m Model) viewMenuMain() string {
+	return m.viewMenuMainPanel(m.width >= minArtWidth && m.height >= minArtHeight)
+}
+
+// viewMenuHost delegates to viewMenuHostPanel for callers that need the
+// host sub-screen content directly.
+func (m Model) viewMenuHost() string { return m.viewMenuHostPanel() }
+
+// viewMenuJoin delegates to viewMenuJoinPanel for callers that need the
+// join sub-screen content directly.
+func (m Model) viewMenuJoin() string { return m.viewMenuJoinPanel() }
+
+// viewMenuMainPanel renders the three-item list inside a rounded panel.
+func (m Model) viewMenuMainPanel(showFan bool) string {
+	var inner strings.Builder
+
 	for i, label := range menuItemLabels {
-		if i == m.menuCursor {
-			items.WriteString(styleMenuSel.Render("▶  " + label))
-		} else {
-			items.WriteString(styleMenuItem.Render("   " + label))
+		if i > 0 {
+			inner.WriteString("\n")
 		}
-		if i < menuItemCount-1 {
-			items.WriteString("\n")
+		if i == m.menuCursor {
+			inner.WriteString(styleMenuSel.Render("▶  " + label))
+		} else {
+			inner.WriteString(styleMenuItem.Render("   " + label))
 		}
 	}
-	b.WriteString(styleMenuBox.Render(items.String()))
-	b.WriteString("\n\n")
-	b.WriteString(helpBar(
+
+	if showFan {
+		inner.WriteString("\n\n")
+		inner.WriteString(cardFanFooter())
+	}
+
+	inner.WriteString("\n\n")
+	inner.WriteString(helpBar(
 		helpEntry{"↑↓ / k j", "mover"},
 		helpEntry{"Enter", "elegir"},
 		helpEntry{"Q", "salir"},
 	))
-	if m.updateNotice != "" {
-		b.WriteString("\n")
-		b.WriteString(styleDim.Render(
-			"Hay una versión nueva (v" + m.updateNotice + ") — actualizá con: loba update",
-		))
-	}
-	return b.String()
+
+	return styleMenuPanel.Render(inner.String()) + "\n"
 }
 
-func (m Model) viewMenuHost() string {
-	var b strings.Builder
-	b.WriteString(styleTitle.Render("Crear sala") + "\n\n")
+// viewMenuHostPanel renders the "Crear sala" sub-screen inside a rounded panel.
+func (m Model) viewMenuHostPanel() string {
+	var inner strings.Builder
+
+	inner.WriteString(stylePanelTitle.Render("Crear sala") + "\n\n")
 
 	toggleLabel := "sala pública (túnel bore.pub)"
 	if m.menuPublic {
-		b.WriteString("  " + styleToggleOn.Render("[ ✓ ] "+toggleLabel) + "\n")
+		inner.WriteString(styleToggleOn.Render("[ ✓ ] " + toggleLabel) + "\n")
 	} else {
-		b.WriteString("  " + styleToggleOff.Render("[ · ] "+toggleLabel) + "\n")
+		inner.WriteString(styleToggleOff.Render("[ · ] " + toggleLabel) + "\n")
 	}
-	b.WriteString(styleDim.Render("  Puerto: 7777 (por defecto)") + "\n")
-	b.WriteString("\n")
-	b.WriteString(helpBar(
+	inner.WriteString(styleDim.Render("Puerto: 7777 (por defecto)") + "\n")
+
+	inner.WriteString("\n")
+	inner.WriteString(helpBar(
 		helpEntry{"T", "alternar túnel"},
 		helpEntry{"Enter", "iniciar sala"},
 		helpEntry{"Esc", "volver"},
 	))
-	return b.String()
+
+	return styleMenuPanel.Render(inner.String()) + "\n"
 }
 
-func (m Model) viewMenuJoin() string {
-	var b strings.Builder
-	b.WriteString(styleTitle.Render("Unirse a sala") + "\n\n")
-	b.WriteString(styleDim.Render("  Dirección del servidor (ej: bore.pub:12345 o 192.168.1.10:7777)") + "\n\n")
-	b.WriteString("  " + styleInput.Render(m.menuAddrInput+"█") + "\n")
+// viewMenuJoinPanel renders the address-input sub-screen inside a rounded panel.
+func (m Model) viewMenuJoinPanel() string {
+	var inner strings.Builder
+
+	inner.WriteString(stylePanelTitle.Render("Unirse a sala") + "\n\n")
+	inner.WriteString(styleDim.Render("Dirección del servidor (ej: bore.pub:12345 o 192.168.1.10:7777)") + "\n\n")
+	inner.WriteString(styleInput.Render(m.menuAddrInput+"█") + "\n")
 	if m.menuAddrErr != "" {
-		b.WriteString("\n  " + styleErr.Render(m.menuAddrErr) + "\n")
+		inner.WriteString("\n" + styleErr.Render(m.menuAddrErr) + "\n")
 	}
-	b.WriteString("\n")
-	b.WriteString(helpBar(
+	inner.WriteString("\n")
+	inner.WriteString(helpBar(
 		helpEntry{"Enter", "conectar"},
 		helpEntry{"Esc", "volver"},
 	))
-	return b.String()
+
+	return styleMenuPanel.Render(inner.String()) + "\n"
 }
 
 // ─── Fatal error view ─────────────────────────────────────────────────────────

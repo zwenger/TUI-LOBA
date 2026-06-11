@@ -413,3 +413,33 @@ func TestMenuViewPublicToggleRendered(t *testing.T) {
 		t.Error("host sub-screen with public=true should show checkmark ✓")
 	}
 }
+
+// ─── Visual composition tests ─────────────────────────────────────────────────
+
+// TestMenuScreensVisual100x30 prints menu, host, and join screens at 100×30.
+// Always passes; run with: go test -v -run TestMenuScreensVisual100x30
+func TestMenuScreensVisual100x30(t *testing.T) {
+	dims := []struct{ w, h int }{{100, 30}, {80, 24}}
+	screens := []struct {
+		name string
+		sub  int
+	}{
+		{"menu-main", menuSubMain},
+		{"host", menuSubHost},
+		{"join", menuSubJoin},
+	}
+	for _, d := range dims {
+		for _, s := range screens {
+			m := makeMenuModel(d.w, d.h)
+			m.menuSubScreen = s.sub
+			if s.sub == menuSubJoin {
+				m.menuAddrInput = "bore.pub:12345"
+			}
+			view := m.viewMenu()
+			t.Logf("\n=== %s @ %dx%d ===\n%s", s.name, d.w, d.h, view)
+			if strings.TrimSpace(view) == "" {
+				t.Errorf("%s @ %dx%d: viewMenu() empty", s.name, d.w, d.h)
+			}
+		}
+	}
+}

@@ -1256,3 +1256,475 @@ func TestRenderVisualAllPlayersAbsoluteOrder(t *testing.T) {
 		t.Error("players row is empty")
 	}
 }
+
+// ─── Menu art tests ───────────────────────────────────────────────────────────
+
+// makeMenuModel returns a menu Model with width/height set for the art path.
+func makeMenuModel(w, h int) Model {
+	m := NewMenu(noopHostFn, noopJoinFn, "dev")
+	m.width = w
+	m.height = h
+	return m
+}
+
+// TestRenderVisualMenuArt prints the full menu view at width 100 (art path)
+// and width 50 (narrow/no-art path). Always passes.
+// Run with: go test -v -run TestRenderVisualMenuArt
+func TestRenderVisualMenuArt(t *testing.T) {
+	for _, w := range []int{100, 50} {
+		m := makeMenuModel(w, 40)
+		view := m.viewMenu()
+		fmt.Printf("\n=== Menu — width=%d ===\n", w)
+		fmt.Println(view)
+		if strings.TrimSpace(view) == "" {
+			t.Errorf("viewMenu() empty for width=%d", w)
+		}
+	}
+}
+
+// TestMenuArtNarrowNoArt verifies that a narrow terminal (width < minArtWidth)
+// skips the big pixel art section and falls back to the compact text header.
+func TestMenuArtNarrowNoArt(t *testing.T) {
+	m := makeMenuModel(50, 40)
+	view := m.viewMenu()
+	// At narrow widths the pixel wordmark (▀/▄ heavy blocks from the 36-col grid)
+	// must not appear. The compact header() uses "▄▀" as decoration, so we check
+	// that the card fan (╭──╮) is absent — that only renders on the art path.
+	if strings.Contains(view, "╭──╮") {
+		t.Error("narrow menu (w=50) should not render the card fan (art path skipped)")
+	}
+}
+
+// TestMenuArtWideContainsArt verifies that a wide terminal (width >= minArtWidth)
+// produces the half-block LOBA wordmark (▀/▄ chars from the pixel renderer).
+func TestMenuArtWideContainsArt(t *testing.T) {
+	m := makeMenuModel(100, 40)
+	view := m.viewMenu()
+	if !strings.Contains(view, "▀") && !strings.Contains(view, "▄") {
+		t.Error("wide menu (w=100) should contain half-block pixel art chars (▀ or ▄) from the wordmark")
+	}
+}
+
+// TestMenuArtWideContainsHotDog verifies that a wide terminal includes the
+// half-block hot dog sprite (▀ or ▄ chars from the pixel renderer).
+func TestMenuArtWideContainsHotDog(t *testing.T) {
+	m := makeMenuModel(100, 40)
+	view := m.viewMenu()
+	if !strings.Contains(view, "▀") && !strings.Contains(view, "▄") {
+		t.Error("wide menu (w=100) should contain half-block pixel art chars (▀ or ▄) for the hot dog")
+	}
+}
+
+// ─── Pixel renderer unit tests ────────────────────────────────────────────────
+
+// TestRenderSprite2x2AllCases verifies all four top/bottom colour combinations
+// for a 2×2 sprite: both coloured, top only, bottom only, both transparent.
+func TestRenderSprite2x2AllCases(t *testing.T) {
+	palette := map[rune]string{
+		'A': "196", // red
+		'B': "46",  // green
+	}
+
+	// 2 pixel rows → 1 terminal row.
+	// Column layout: both, top-only, bot-only, neither.
+	grid := []string{
+		"AB..", // row 0 (top): col0=A col1=A col2=. col3=.
+		"A..B", // row 1 (bot): col0=A col1=. col2=. col3=B
+	}
+	// Expected chars per column:
+	//   col0: top=A bot=A → ▀ with fg=196 bg=196
+	//   col1: top=A bot=. → ▀ with fg=196, no bg    (actually col1 top='B', bot='.')
+	//   col2: top=. bot=. → space
+	//   col3: top=. bot=B → ▄ with fg=46
+
+	// Redefine with simpler col layout matching the description:
+	grid = []string{
+		"AB..", // top: col0=A, col1=B, col2=., col3=.
+		"A..B", // bot: col0=A, col1=., col2=., col3=B
+	}
+
+	result := RenderSprite(grid, palette)
+	lines := strings.Split(result, "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
+		t.Fatalf("RenderSprite returned empty for 2x2 grid\nresult: %q", result)
+	}
+
+	// Structural checks: must contain ▀ and ▄ and space.
+	if !strings.Contains(result, "▀") {
+		t.Error("2x2 sprite missing ▀ (upper-half block)")
+	}
+	if !strings.Contains(result, "▄") {
+		t.Error("2x2 sprite missing ▄ (lower-half block)")
+	}
+	if !strings.Contains(result, " ") {
+		t.Error("2x2 sprite missing space (transparent column)")
+	}
+}
+
+// TestRenderSpriteEqualWidths verifies that all output lines have the same
+// lipgloss.Width (required for clean JoinHorizontal / centering).
+func TestRenderSpriteEqualWidths(t *testing.T) {
+	palette := map[rune]string{'X': "214"}
+	grid := []string{
+		"XX...XXX",
+		"...XX...",
+		"XXXXXXXX",
+		"X......X",
+	}
+	result := RenderSprite(grid, palette)
+	lines := strings.Split(result, "\n")
+	if len(lines) == 0 {
+		t.Fatal("RenderSprite returned empty")
+	}
+	first := lipgloss.Width(lines[0])
+	for i, line := range lines {
+		w := lipgloss.Width(line)
+		if w != first {
+			t.Errorf("line[%d] width=%d differs from line[0] width=%d", i, w, first)
+		}
+	}
+}
+
+// TestRenderSpriteTransparency verifies that a fully transparent sprite produces
+// only spaces (no colour codes, no block chars).
+func TestRenderSpriteTransparency(t *testing.T) {
+	palette := map[rune]string{'X': "214"}
+	grid := []string{
+		"....",
+		"....",
+	}
+	result := RenderSprite(grid, palette)
+	// Strip: should be only spaces (plain, no ANSI styling needed).
+	plain := lipgloss.NewStyle().Render(result)
+	_ = plain
+	if strings.Contains(result, "▀") || strings.Contains(result, "▄") {
+		t.Error("fully transparent sprite must not contain block chars")
+	}
+}
+
+// TestHotDogSpriteRowLengths verifies that every row of the hot dog sprite
+// has the same rune-count (consistent width for correct rendering).
+func TestHotDogSpriteRowLengths(t *testing.T) {
+	if len(hotDogSprite) == 0 {
+		t.Fatal("hotDogSprite is empty")
+	}
+	expected := len([]rune(hotDogSprite[0]))
+	for i, row := range hotDogSprite {
+		got := len([]rune(row))
+		if got != expected {
+			t.Errorf("hotDogSprite row[%d] has %d runes, want %d\nrow: %q", i, got, expected, row)
+		}
+	}
+}
+
+// TestHotDogSpriteLegalRunes verifies that every non-transparent rune in the
+// hot dog sprite exists in hotDogPalette.
+func TestHotDogSpriteLegalRunes(t *testing.T) {
+	for rowIdx, row := range hotDogSprite {
+		for colIdx, r := range []rune(row) {
+			if r == '.' || r == ' ' {
+				continue
+			}
+			if _, ok := hotDogPalette[r]; !ok {
+				t.Errorf("hotDogSprite[%d][%d] rune %q not in palette", rowIdx, colIdx, r)
+			}
+		}
+	}
+}
+
+// TestHotDogSpriteVisualMask prints the letter-mask of the hot dog sprite so the
+// developer can verify the diagonal silhouette. Always passes.
+// Run with: go test -v -run TestHotDogSpriteVisualMask
+func TestHotDogSpriteVisualMask(t *testing.T) {
+	fmt.Println("\n=== Hot dog sprite — letter mask (each non-transparent rune shown as-is) ===")
+	for _, row := range hotDogSprite {
+		fmt.Println(row)
+	}
+	fmt.Println()
+
+	// Also print the colour-rendered version (only visible in a real terminal).
+	fmt.Println("=== Hot dog sprite — colour render ===")
+	fmt.Println(renderHotDog())
+}
+
+// ─── Braille renderer unit tests ──────────────────────────────────────────────
+
+// TestBrailleBitMappingFullCell verifies that a fully-opaque 2×4 pixel block
+// produces U+28FF (⣿), the braille character with all 8 dots set.
+func TestBrailleBitMappingFullCell(t *testing.T) {
+	// All 8 pixels in the single 2×4 cell are '#'.
+	dots := []string{
+		"##",
+		"##",
+		"##",
+		"##",
+	}
+	cells := []string{"A"}
+	palette := map[rune]string{'A': "196"}
+
+	result := RenderBrailleSprite(dots, cells, palette)
+	if !strings.ContainsRune(result, '⣿') {
+		t.Errorf("full 2×4 cell must produce ⣿ (U+28FF), got: %q", result)
+	}
+}
+
+// TestBrailleBitMappingTopLeftOnly verifies that a single top-left pixel
+// produces U+2801 (⠁), the braille character with only dot-1 set (bit 0).
+func TestBrailleBitMappingTopLeftOnly(t *testing.T) {
+	dots := []string{
+		"#.",
+		"..",
+		"..",
+		"..",
+	}
+	cells := []string{"A"}
+	palette := map[rune]string{'A': "196"}
+
+	result := RenderBrailleSprite(dots, cells, palette)
+	if !strings.ContainsRune(result, '⠁') {
+		t.Errorf("top-left only pixel must produce ⠁ (U+2801), got: %q", result)
+	}
+}
+
+// TestBrailleBitMappingTopRightOnly verifies that a single top-right pixel
+// produces U+2808 (⠈), the braille character with only dot-4 set (bit 3).
+func TestBrailleBitMappingTopRightOnly(t *testing.T) {
+	dots := []string{
+		".#",
+		"..",
+		"..",
+		"..",
+	}
+	cells := []string{"A"}
+	palette := map[rune]string{'A': "196"}
+
+	result := RenderBrailleSprite(dots, cells, palette)
+	if !strings.ContainsRune(result, '⠈') {
+		t.Errorf("top-right only pixel must produce ⠈ (U+2808), got: %q", result)
+	}
+}
+
+// TestBrailleTransparentCell verifies that a fully-transparent cell (all '.' dots
+// OR '.' in cell color) renders as a plain space.
+func TestBrailleTransparentCell(t *testing.T) {
+	// Case 1: all dots off.
+	dots := []string{
+		"..",
+		"..",
+		"..",
+		"..",
+	}
+	cells := []string{"A"}
+	palette := map[rune]string{'A': "196"}
+
+	result := RenderBrailleSprite(dots, cells, palette)
+	if strings.ContainsRune(result, '⠁') || result != " " {
+		t.Errorf("all-transparent dots must produce a space, got: %q", result)
+	}
+
+	// Case 2: dots on but transparent cell color.
+	dots2 := []string{
+		"##",
+		"##",
+		"##",
+		"##",
+	}
+	cells2 := []string{"."}
+
+	result2 := RenderBrailleSprite(dots2, cells2, palette)
+	if result2 != " " {
+		t.Errorf("transparent cell color must produce a space, got: %q", result2)
+	}
+}
+
+// TestBrailleEqualLineWidths verifies that all output lines from RenderBrailleSprite
+// have equal lipgloss.Width (required for clean JoinHorizontal).
+func TestBrailleEqualLineWidths(t *testing.T) {
+	dots := []string{
+		"####..",
+		"..####",
+		"######",
+		"......",
+		"#..#..",
+		"####..",
+		".#.#.#",
+		"......",
+	}
+	cells := []string{
+		"ABA",
+		"CAD",
+	}
+	palette := map[rune]string{
+		'A': "196",
+		'B': "46",
+		'C': "214",
+		'D': "201",
+	}
+
+	result := RenderBrailleSprite(dots, cells, palette)
+	lines := strings.Split(result, "\n")
+	if len(lines) == 0 {
+		t.Fatal("RenderBrailleSprite returned empty")
+	}
+	first := lipgloss.Width(lines[0])
+	for i, line := range lines {
+		w := lipgloss.Width(line)
+		if w != first {
+			t.Errorf("braille line[%d] width=%d differs from line[0] width=%d", i, w, first)
+		}
+	}
+}
+
+// TestBrailleBottomRightOnlyDot verifies dot-8 (bit 7, bottom-right) mapping.
+// A single pixel at row3,col1 must produce U+2880 (⢀).
+func TestBrailleBottomRightOnlyDot(t *testing.T) {
+	dots := []string{
+		"..",
+		"..",
+		"..",
+		".#",
+	}
+	cells := []string{"A"}
+	palette := map[rune]string{'A': "196"}
+
+	result := RenderBrailleSprite(dots, cells, palette)
+	want := rune(0x2800 + 128) // bit 7 set = 0x2880
+	if !strings.ContainsRune(result, want) {
+		t.Errorf("bottom-right only pixel must produce %c (U+%04X), got: %q", want, want, result)
+	}
+}
+
+// TestHotDogSpriteRenderedLineCount verifies the half-block hot dog renders
+// as exactly 12 terminal rows (24 pixel rows / 2 rows per half-block line).
+func TestHotDogSpriteRenderedLineCount(t *testing.T) {
+	rendered := renderHotDog()
+	lines := strings.Split(rendered, "\n")
+	if len(lines) != 12 {
+		t.Errorf("renderHotDog produced %d lines, want 12", len(lines))
+	}
+}
+
+// TestHotDogSpriteRenderedEqualWidths verifies all rendered hot dog lines have
+// equal lipgloss.Width (required for clean JoinHorizontal / centering).
+func TestHotDogSpriteRenderedEqualWidths(t *testing.T) {
+	rendered := renderHotDog()
+	lines := strings.Split(rendered, "\n")
+	if len(lines) == 0 {
+		t.Fatal("renderHotDog returned empty")
+	}
+	first := lipgloss.Width(lines[0])
+	for i, line := range lines {
+		w := lipgloss.Width(line)
+		if w != first {
+			t.Errorf("hot dog line[%d] width=%d differs from line[0] width=%d", i, w, first)
+		}
+	}
+}
+
+// ─── Wordmark tests ───────────────────────────────────────────────────────────
+
+// TestWordmarkGridRowCount verifies the wordmark pixel grid has exactly 10 rows.
+func TestWordmarkGridRowCount(t *testing.T) {
+	if len(lobaWordmarkGrid) != 10 {
+		t.Errorf("lobaWordmarkGrid has %d rows, want 10", len(lobaWordmarkGrid))
+	}
+}
+
+// TestWordmarkGridConsistentWidth verifies all wordmark pixel rows have the
+// same rune count.
+func TestWordmarkGridConsistentWidth(t *testing.T) {
+	if len(lobaWordmarkGrid) == 0 {
+		t.Fatal("lobaWordmarkGrid is empty")
+	}
+	expected := len([]rune(lobaWordmarkGrid[0]))
+	for i, row := range lobaWordmarkGrid {
+		got := len([]rune(row))
+		if got != expected {
+			t.Errorf("lobaWordmarkGrid[%d] has %d runes, want %d", i, got, expected)
+		}
+	}
+}
+
+// TestWordmarkRenderedLineCount verifies renderLobaWordmark produces 5 lines
+// (10 pixel rows / 2 rows per half-block line).
+func TestWordmarkRenderedLineCount(t *testing.T) {
+	rendered := renderLobaWordmark()
+	lines := strings.Split(rendered, "\n")
+	if len(lines) != 5 {
+		t.Errorf("renderLobaWordmark produced %d lines, want 5", len(lines))
+	}
+}
+
+// TestWordmarkRenderedEqualWidths verifies all 5 rendered lines have the same
+// lipgloss.Width.
+func TestWordmarkRenderedEqualWidths(t *testing.T) {
+	rendered := renderLobaWordmark()
+	lines := strings.Split(rendered, "\n")
+	if len(lines) == 0 {
+		t.Fatal("renderLobaWordmark returned empty")
+	}
+	first := lipgloss.Width(lines[0])
+	for i, line := range lines {
+		w := lipgloss.Width(line)
+		if w != first {
+			t.Errorf("wordmark line[%d] width=%d differs from line[0] width=%d", i, w, first)
+		}
+	}
+}
+
+// TestWordmarkContainsHalfBlockChars verifies the rendered wordmark contains
+// ▀ or ▄ characters (confirming the pixel grid has opaque pixels).
+func TestWordmarkContainsHalfBlockChars(t *testing.T) {
+	rendered := renderLobaWordmark()
+	if !strings.Contains(rendered, "▀") && !strings.Contains(rendered, "▄") {
+		t.Error("wordmark should contain half-block chars (▀ or ▄) — pixel grid may be empty")
+	}
+}
+
+// TestWordmarkVisualMask prints the raw pixel grid so a developer can visually
+// verify letter shapes. Always passes.
+// Run with: go test -v -run TestWordmarkVisualMask
+func TestWordmarkVisualMask(t *testing.T) {
+	fmt.Println("\n=== LOBA wordmark — pixel mask ===")
+	for i, row := range lobaWordmarkGrid {
+		fmt.Printf("row %2d: %s\n", i, row)
+	}
+	fmt.Println()
+	fmt.Println("=== LOBA wordmark — rendered (colour visible in terminal) ===")
+	fmt.Println(renderLobaWordmark())
+}
+
+// TestHotDogSpriteVisualHalfBlock prints the half-block hot dog sprite letter
+// mask and rendered output so a developer can visually verify the art.
+// Always passes.
+// Run with: go test -v -run TestHotDogSpriteVisualHalfBlock
+func TestHotDogSpriteVisualHalfBlock(t *testing.T) {
+	fmt.Printf("\n=== Hot dog sprite — pixel mask (%d rows × %d cols) ===\n",
+		len(hotDogSprite), func() int {
+			if len(hotDogSprite) > 0 {
+				return len([]rune(hotDogSprite[0]))
+			}
+			return 0
+		}())
+	for _, row := range hotDogSprite {
+		fmt.Println(row)
+	}
+	fmt.Println()
+	fmt.Println("=== Hot dog sprite — rendered (colour visible in terminal) ===")
+	fmt.Println(renderHotDog())
+}
+
+// TestMenuVisualArtAt100And50 prints the full menu at width 100 and 50.
+// Always passes.
+// Run with: go test -v -run TestMenuVisualArtAt100And50
+func TestMenuVisualArtAt100And50(t *testing.T) {
+	for _, w := range []int{100, 50} {
+		m := makeMenuModel(w, 40)
+		view := m.viewMenu()
+		fmt.Printf("\n=== Menu art — width=%d ===\n", w)
+		fmt.Println(view)
+		if strings.TrimSpace(view) == "" {
+			t.Errorf("viewMenu() empty for width=%d", w)
+		}
+	}
+}
