@@ -1,0 +1,42 @@
+version: "2"
+
+linters:
+  # misspell is intentionally omitted: the project has bilingual (Spanish) UI
+  # strings and comments, which misspell's English dictionary flags as typos.
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - unconvert
+  settings:
+    errcheck:
+      # Closing a reader/connection or setting a socket deadline on a best-effort
+      # path is idiomatic fire-and-forget; checking those errors adds noise.
+      exclude-functions:
+        - (io.Closer).Close
+        - (net.Conn).Close
+        - (net.Listener).Close
+        - (*net.TCPConn).SetReadDeadline
+        - (net.Conn).SetReadDeadline
+        - (net.Conn).SetDeadline
+    staticcheck:
+      # Drop the "quickfix" suggestions (QF*): they propose optional stylistic
+      # rewrites (De Morgan, tagged switch) rather than flagging real defects.
+      checks:
+        - all
+        - -QF1001
+        - -QF1002
+        - -QF1003
+  exclusions:
+    rules:
+      # Test code is held to a lower bar: unchecked Close/Sscanf and throwaway
+      # helpers are common and low-risk in tests.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - unused
+          - ineffassign
+          - staticcheck
+          - unconvert

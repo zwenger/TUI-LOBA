@@ -3,19 +3,30 @@ MODULE   := github.com/zwenger/TUI-LOBA
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS  := -s -w
 
-.PHONY: all build darwin-arm64 darwin-amd64 linux-amd64 windows-amd64 test vet clean
+.PHONY: all build darwin-arm64 darwin-amd64 linux-amd64 windows-amd64 test vet lint vulncheck check clean
 
 ## Default: build for the current platform.
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
 
-## Run all tests.
+## Run all tests (with the race detector, as CI does).
 test:
-	go test ./...
+	go test -race ./...
 
 ## Run go vet.
 vet:
 	go vet ./...
+
+## Run golangci-lint (install: https://golangci-lint.run/welcome/install/).
+lint:
+	golangci-lint run ./...
+
+## Scan dependencies for known vulnerabilities.
+vulncheck:
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+## Run everything CI runs: vet, lint, vulncheck, and tests.
+check: vet lint vulncheck test
 
 ## Cross-compile all targets.
 all: darwin-arm64 darwin-amd64 linux-amd64 windows-amd64
