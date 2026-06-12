@@ -196,13 +196,46 @@ func WriteJSON(w io.Writer, v any) error {
 	return err
 }
 
+// MaxMessageBytes caps the size of a single newline-delimited message. Any peer
+// (including one reaching the server through the public bore.pub tunnel) that
+// sends a longer line is rejected instead of being buffered without bound — this
+// prevents a memory-exhaustion DoS from an endless stream with no newline.
+// 64 KiB is far above any legitimate command, lobby state, or chat message.
+const MaxMessageBytes = 64 * 1024
+
+// ErrMessageTooLarge is returned when an inbound message exceeds MaxMessageBytes.
+var ErrMessageTooLarge = fmt.Errorf("message exceeds %d bytes", MaxMessageBytes)
+
 // ReadJSON reads one newline-delimited JSON object from r and decodes it into v.
+// The line is capped at MaxMessageBytes to bound memory use against a hostile peer.
 func ReadJSON(r *bufio.Reader, v any) error {
-	line, err := r.ReadString('\n')
+	line, err := readLimitedLine(r, MaxMessageBytes)
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal([]byte(line), v)
+	return json.Unmarshal(line, v)
+}
+
+// readLimitedLine reads up to and including the next '\n', returning an error
+// once the accumulated bytes would exceed max. It uses ReadSlice in a loop so a
+// long line is detected after a few buffer-sized chunks rather than being held
+// entirely in memory first.
+func readLimitedLine(r *bufio.Reader, max int) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if len(buf)+len(chunk) > max {
+			return nil, ErrMessageTooLarge
+		}
+		buf = append(buf, chunk...) // ReadSlice's slice is only valid until the next read; copy it
+		if err == bufio.ErrBufferFull {
+			continue // line longer than the internal buffer; keep accumulating
+		}
+		if err != nil {
+			return nil, err
+		}
+		return buf, nil
+	}
 }
 
 // SendEnvelope marshals payload and writes an Envelope.

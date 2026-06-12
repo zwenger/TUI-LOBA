@@ -138,6 +138,20 @@ func (s *Server) HandleConn(conn net.Conn) {
 func (s *Server) handleConn(conn net.Conn) {
 	enableKeepalive(conn)
 	defer conn.Close()
+
+	// Recover from any panic in command handling so one malformed message from a
+	// hostile peer cannot crash the whole process (and the game for everyone).
+	// playerID is declared here so the recover can mark the player disconnected.
+	var playerID string
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[server] recovered panic handling %v: %v", conn.RemoteAddr(), rec)
+			if playerID != "" {
+				s.markDisconnected(playerID)
+			}
+		}
+	}()
+
 	r := bufio.NewReader(conn)
 
 	// First message must be a join command.
@@ -172,11 +186,12 @@ func (s *Server) handleConn(conn net.Conn) {
 		name = strings.TrimSpace(nameCmd.Name)
 	}
 
-	playerID, _, err := s.registerPlayer(conn, name)
+	pid, _, err := s.registerPlayer(conn, name)
 	if err != nil {
 		_ = protocol.SendError(conn, err.Error())
 		return
 	}
+	playerID = pid // assign to the outer var so the panic recover can clean up
 
 	log.Printf("[server] %s joined as %s", conn.RemoteAddr(), name)
 
@@ -825,6 +840,11 @@ func (s *Server) enqueueEnvelope(cl *client, evtType string, payload any) error 
 // ─── Client write pump ────────────────────────────────────────────────────────
 
 func (cl *client) writePump() {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[server] recovered panic in client writePump: %v", rec)
+		}
+	}()
 	for data := range cl.send {
 		if _, err := cl.conn.Write(data); err != nil {
 			break
@@ -834,6 +854,11 @@ func (cl *client) writePump() {
 
 func (pnd *pending) writePump() {
 	defer close(pnd.done)
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[server] recovered panic in pending writePump: %v", rec)
+		}
+	}()
 	for data := range pnd.send {
 		if _, err := pnd.conn.Write(data); err != nil {
 			break
