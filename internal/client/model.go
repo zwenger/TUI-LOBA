@@ -13,6 +13,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
@@ -182,8 +183,9 @@ type Model struct {
 	publicAddr   string // tunnel public address, non-empty when host used --public
 
 	// lobby chat (waiting room, before the host starts the game)
-	lobbyChat      []string // received messages, newest last; entries may be multiline
-	lobbyChatInput string   // message being composed; may contain newlines (Ctrl+J / paste)
+	lobbyChat       []string // received messages, newest last; entries may be multiline
+	lobbyChatInput  string   // message being composed; may contain newlines (Ctrl+J / paste)
+	lobbyChatScroll int      // visual lines scrolled up from the bottom; 0 = newest
 
 	// seat picker (reconnect to a started game)
 	seats       []protocol.SeatEntry
@@ -606,6 +608,15 @@ func (m Model) handleLobbyKey(key string) (tea.Model, tea.Cmd) {
 			_ = protocol.WriteJSON(m.conn, protocol.Command{Type: protocol.CmdChat, Text: text})
 		}
 		m.lobbyChatInput = ""
+		m.lobbyChatScroll = 0 // sending jumps back to the newest messages
+	case "up":
+		m.lobbyChatScroll = min(m.lobbyChatScroll+1, m.lobbyMaxChatScroll())
+	case "down":
+		m.lobbyChatScroll = max(0, m.lobbyChatScroll-1)
+	case "pgup":
+		m.lobbyChatScroll = min(m.lobbyChatScroll+m.lobbyChatViewHeight(), m.lobbyMaxChatScroll())
+	case "pgdown":
+		m.lobbyChatScroll = max(0, m.lobbyChatScroll-m.lobbyChatViewHeight())
 	case "ctrl+j":
 		if len([]rune(m.lobbyChatInput)) < maxLobbyChatInput {
 			m.lobbyChatInput += "\n"
@@ -1050,6 +1061,50 @@ const repoURL = "https://github.com/zwenger/TUI-LOBA"
 
 func (m Model) viewLobby() string {
 	var b strings.Builder
+	b.WriteString(m.lobbyTopSection())
+
+	// ── Chat box: fixed height window over the wrapped message lines ──
+	lines := m.lobbyChatWrappedLines()
+	chatH := m.lobbyChatViewHeight()
+	maxScroll := max(0, len(lines)-chatH)
+	scroll := min(m.lobbyChatScroll, maxScroll)
+	end := len(lines) - scroll
+	start := max(0, end-chatH)
+
+	title := stylePanelTitle.Render("Chat")
+	if maxScroll > 0 {
+		pos := fmt.Sprintf("  líneas %d-%d de %d", start+1, end, len(lines))
+		if scroll > 0 {
+			pos += " — ↓ para ir al final"
+		}
+		title += styleDim.Render(pos)
+	}
+
+	var chat strings.Builder
+	chat.WriteString(title + "\n")
+	if len(lines) == 0 {
+		chat.WriteString(styleDim.Render("(no hay mensajes todavía)") + "\n")
+	} else {
+		chat.WriteString(strings.Join(lines[start:end], "\n") + "\n")
+	}
+	chat.WriteString("\n")
+	chat.WriteString(m.lobbyInputSection())
+
+	// Fixed full-terminal width so the box doesn't resize with message length.
+	chatBox := styleBox
+	if m.width > 4 {
+		chatBox = chatBox.Width(m.width - 2) // -2 for the border columns
+	}
+	b.WriteString(chatBox.Render(chat.String()))
+
+	b.WriteString(m.lobbyBottomSection())
+	return b.String()
+}
+
+// lobbyTopSection renders the header, the public-address share block (host
+// with --public only), and the connected-players box.
+func (m Model) lobbyTopSection() string {
+	var b strings.Builder
 	b.WriteString(header())
 	b.WriteString("\n")
 
@@ -1087,37 +1142,31 @@ func (m Model) viewLobby() string {
 	)
 	b.WriteString(styleBox.Render(content))
 	b.WriteString("\n")
+	return b.String()
+}
 
-	// ── Chat box ──
-	var chat strings.Builder
-	chat.WriteString(stylePanelTitle.Render("Chat") + "\n")
-	if len(m.lobbyChat) == 0 {
-		chat.WriteString(styleDim.Render("(no hay mensajes todavía)") + "\n")
-	} else {
-		// Flatten multiline messages and show the last N rendered lines.
-		var lines []string
-		for _, msg := range m.lobbyChat {
-			lines = append(lines, strings.Split(msg, "\n")...)
-		}
-		if len(lines) > maxLobbyChatLines {
-			lines = lines[len(lines)-maxLobbyChatLines:]
-		}
-		chat.WriteString(strings.Join(lines, "\n") + "\n")
+// lobbyInputSection renders the chat input, showing at most the last
+// maxChatInputLines lines so a long multiline paste can't grow the box.
+func (m Model) lobbyInputSection() string {
+	var b strings.Builder
+	inputLines := strings.Split(m.lobbyChatInput+"█", "\n")
+	if hidden := len(inputLines) - maxChatInputLines; hidden > 0 {
+		inputLines = inputLines[hidden:]
+		b.WriteString(styleDim.Render(fmt.Sprintf("… (+%d líneas arriba)", hidden)) + "\n")
 	}
-	chat.WriteString("\n")
-	chat.WriteString(styleInput.Render(m.lobbyChatInput + "█"))
-	// Fixed full-terminal width so the box doesn't resize with message length.
-	chatBox := styleBox
-	if m.width > 4 {
-		chatBox = chatBox.Width(m.width - 2) // -2 for the border columns
-	}
-	b.WriteString(chatBox.Render(chat.String()))
+	b.WriteString(styleInput.Render(strings.Join(inputLines, "\n")))
+	return b.String()
+}
 
+// lobbyBottomSection renders the error line, help bar, and waiting notice.
+func (m Model) lobbyBottomSection() string {
+	var b strings.Builder
 	if m.lastError != "" {
 		b.WriteString("\n" + styleErr.Render(m.lastError))
 	}
 	b.WriteString("\n" + helpBar(
 		helpEntry{"Enter", "enviar"},
+		helpEntry{"↑↓ / PgUp PgDn", "scroll"},
 		helpEntry{"Ctrl+J", "nueva línea"},
 		helpEntry{"Ctrl+S", "comenzar (anfitrión)"},
 		helpEntry{"Ctrl+C", "salir"},
@@ -1126,8 +1175,58 @@ func (m Model) viewLobby() string {
 	return b.String()
 }
 
+// lobbyChatInnerWidth is the usable content width inside the chat box
+// (terminal minus the box borders and padding).
+func (m Model) lobbyChatInnerWidth() int {
+	if m.width > 8 {
+		return m.width - 4
+	}
+	return 76
+}
+
+// lobbyChatWrappedLines flattens the chat history into terminal-width visual
+// lines. Wrapping happens BEFORE windowing so one very long message can't
+// blow the box height past the window size.
+func (m Model) lobbyChatWrappedLines() []string {
+	w := m.lobbyChatInnerWidth()
+	var lines []string
+	for _, msg := range m.lobbyChat {
+		lines = append(lines, strings.Split(ansi.Hardwrap(msg, w, true), "\n")...)
+	}
+	return lines
+}
+
+// lobbyChatViewHeight returns how many chat history lines fit so the whole
+// lobby screen stays within the terminal height.
+func (m Model) lobbyChatViewHeight() int {
+	if m.height <= 0 {
+		return maxLobbyChatLines
+	}
+	// Chat box chrome: borders (2) + title (1) + separator before input (1).
+	overhead := lipgloss.Height(m.lobbyTopSection()) +
+		lipgloss.Height(m.lobbyInputSection()) +
+		lipgloss.Height(m.lobbyBottomSection()) + 4
+	h := m.height - overhead
+	if h < 3 {
+		return 3
+	}
+	if h > maxLobbyChatLines {
+		return maxLobbyChatLines
+	}
+	return h
+}
+
+// lobbyMaxChatScroll is the highest valid scroll offset for the current
+// history, window height, and terminal size.
+func (m Model) lobbyMaxChatScroll() int {
+	return max(0, len(m.lobbyChatWrappedLines())-m.lobbyChatViewHeight())
+}
+
 // maxLobbyChatLines caps how many rendered chat lines the lobby shows at once.
 const maxLobbyChatLines = 12
+
+// maxChatInputLines caps how many lines of the composed message are visible.
+const maxChatInputLines = 5
 
 // ─── Seat picker view ─────────────────────────────────────────────────────────
 
