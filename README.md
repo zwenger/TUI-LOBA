@@ -4,6 +4,14 @@
   <img src="assets/tui-loba.jpg" alt="TUI-LOBA — Argentine rummy in your terminal" width="800">
 </p>
 
+<p align="center">
+  <a href="https://github.com/zwenger/TUI-LOBA/actions/workflows/ci.yml"><img src="https://github.com/zwenger/TUI-LOBA/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/zwenger/TUI-LOBA/releases/latest"><img src="https://img.shields.io/github/v/release/zwenger/TUI-LOBA" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/zwenger/TUI-LOBA" alt="License"></a>
+  <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/zwenger/TUI-LOBA" alt="Go version"></a>
+  <a href="https://goreportcard.com/report/github.com/zwenger/TUI-LOBA"><img src="https://goreportcard.com/badge/github.com/zwenger/TUI-LOBA" alt="Go Report Card"></a>
+</p>
+
 A multiplayer Argentine rummy card game playable over TCP in your terminal.
 One player hosts; everyone else joins. No servers to configure, no accounts —
 just build and play.
