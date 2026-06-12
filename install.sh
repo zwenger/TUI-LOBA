@@ -24,8 +24,9 @@ case "${OS}" in
   Linux)  GOOS="linux"  ;;
   *)
     echo "Error: sistema operativo '${OS}' no soportado." >&2
-    echo "Usuarios de Windows: descargá el .zip desde https://github.com/${REPO}/releases" >&2
-    echo "o usá play.ps1 desde PowerShell para correr desde el código fuente." >&2
+    echo "Usuarios de Windows: desde PowerShell ejecutá:" >&2
+    echo "  irm https://raw.githubusercontent.com/${REPO}/main/install.ps1 | iex" >&2
+    echo "o descargá el .zip desde https://github.com/${REPO}/releases" >&2
     exit 1
     ;;
 esac

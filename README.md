@@ -94,12 +94,19 @@ Downloads the latest tagged release, verifies the SHA-256 checksum, and
 installs `loba` to `/usr/local/bin` (or `~/.local/bin` if not writable).
 No Go installation required.
 
-### Windows
+### One-liner (Windows, PowerShell)
 
-Download the `.zip` archive for your platform from the
-[releases page](https://github.com/zwenger/TUI-LOBA/releases), extract
-the binary, and place it somewhere on your `PATH`. Or use the dev channel
-below — it requires no manual download and always runs the latest code.
+```powershell
+irm https://raw.githubusercontent.com/zwenger/TUI-LOBA/main/install.ps1 | iex
+```
+
+Downloads the latest tagged release, verifies the SHA-256 checksum, installs
+`loba.exe` to `%LOCALAPPDATA%\Programs\loba`, and adds it to your user `PATH`
+(open a new terminal afterwards). No admin rights or Go installation required.
+
+Alternatively, download the `.zip` archive from the
+[releases page](https://github.com/zwenger/TUI-LOBA/releases) and place the
+binary somewhere on your `PATH` yourself, or use the dev channel below.
 
 ### go install (requires Go 1.21+)
 
