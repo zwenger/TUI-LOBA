@@ -152,6 +152,9 @@ type Model struct {
 	menuAddrInput string // address typed in the join sub-screen
 	menuAddrErr   string // inline validation error for join address
 	menuSubScreen int    // 0=main menu  1=join address input  2=host confirm
+	menuDeal      int    // deal-animation ticks elapsed for the card fan (0..menuDealSteps)
+	menuShakeCard  int   // fan card index currently shaking; -1 when idle
+	menuShakeTicks int   // shake-animation ticks remaining; 0 when idle
 
 	// bootstrap callbacks injected by main when launching in menu mode
 	hostBootstrap HostBootstrapFunc
@@ -241,6 +244,7 @@ func NewMenu(hostFn HostBootstrapFunc, joinFn JoinBootstrapFunc, ver string) Mod
 		hostBootstrap: hostFn,
 		joinBootstrap: joinFn,
 		version:       ver,
+		menuShakeCard: -1,
 	}
 }
 
@@ -270,8 +274,11 @@ type UpdateNoticeMsg struct{ Version string }
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
-	// Menu and fatal-error screens don't connect on start.
-	if m.screen == screenMenu || m.screen == screenFatalError {
+	// The menu doesn't connect on start; it only runs the card-deal animation.
+	if m.screen == screenMenu {
+		return menuDealTick()
+	}
+	if m.screen == screenFatalError {
 		return nil
 	}
 	// Connect immediately regardless of whether we have a name.
@@ -291,6 +298,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case UpdateNoticeMsg:
 		m.updateNotice = msg.Version
+		return m, nil
+
+	case menuDealMsg:
+		// Advance the menu card-deal animation; the tick chain dies once the
+		// fan is fully dealt or the user leaves the menu.
+		if m.screen != screenMenu || m.menuDeal >= menuDealSteps {
+			return m, nil
+		}
+		m.menuDeal++
+		if m.menuDeal < menuDealSteps {
+			return m, menuDealTick()
+		}
+		return m, nil
+
+	case menuShakeMsg:
+		if m.menuShakeTicks > 0 {
+			m.menuShakeTicks--
+		}
+		if m.menuShakeTicks > 0 && m.screen == screenMenu {
+			return m, menuShakeTick()
+		}
+		m.menuShakeTicks = 0
+		m.menuShakeCard = -1
 		return m, nil
 
 	case bootstrapHostMsg:

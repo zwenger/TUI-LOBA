@@ -17,6 +17,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/zwenger/TUI-LOBA/internal/protocol"
 )
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
@@ -376,16 +378,53 @@ func wordmarkWidth() int {
 
 // ─── Card fan footer ──────────────────────────────────────────────────────────
 
-// cardFanFooter renders the card-fan using the existing four-colour suit styles.
-func cardFanFooter() string {
-	top := "   ╭──╮╭──╮╭──╮╭──╮╭──╮"
-	mid := "   │" + styleSpades.Render("A♠") + "││" +
-		styleHearts.Render("K♥") + "││" +
-		styleDiamonds.Render("Q♦") + "││" +
-		styleClubs.Render("J♣") + "││" +
-		styleJoker.Render("★ ") + "│"
-	bot := "   ╰──╯╰──╯╰──╯╰──╯╰──╯"
-	return strings.Join([]string{top, mid, bot}, "\n")
+// menuFanCards are the fixed cards shown in the start-menu fan.
+var menuFanCards = []protocol.CardView{
+	{Rank: 1, Suit: 0},  // A♠
+	{Rank: 13, Suit: 1}, // K♥
+	{Rank: 12, Suit: 2}, // Q♦
+	{Rank: 11, Suit: 3}, // J♣
+	{Rank: 0, Suit: -1}, // joker
+}
+
+// cardFanBlank is an 8×5 empty block matching one fan slot so that undealt
+// slots keep the panel size stable during the deal animation.
+const cardFanBlank = "        \n        \n        \n        \n        "
+
+// padCardSlot places a 7-wide card box inside an 8-wide slot. The spare column
+// normally trails the card; during a shake's odd ticks it leads instead, moving
+// the card one column right without disturbing its neighbours.
+func padCardSlot(box string, shifted bool) string {
+	lines := strings.Split(box, "\n")
+	for i, ln := range lines {
+		if shifted {
+			lines[i] = " " + ln
+		} else {
+			lines[i] = ln + " "
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// cardFanFooter renders the menu card-fan using the same full card boxes as the
+// player's hand (renderCardBox). dealt is the number of deal-animation ticks
+// elapsed: each tick deals one card face-down and the following tick flips it
+// face-up; values at or above menuDealSteps render the full resting fan.
+// shakeCard (when >= 0) wiggles that card one column on odd shakeTicks.
+func cardFanFooter(dealt, shakeCard, shakeTicks int) string {
+	blocks := make([]string, len(menuFanCards))
+	for i, c := range menuFanCards {
+		switch {
+		case i >= dealt: // not dealt yet
+			blocks[i] = cardFanBlank
+			continue
+		case i == dealt-1 && dealt < menuDealSteps: // just dealt — face down
+			c.Hidden = true
+		}
+		shifted := i == shakeCard && shakeTicks%2 == 1
+		blocks[i] = padCardSlot(renderCardBox(c, false, false), shifted)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, blocks...)
 }
 
 // artBlockWidth returns the rendered visible width of the first line of an art constant.

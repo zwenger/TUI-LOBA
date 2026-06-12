@@ -4,7 +4,9 @@ package client
 // Provides "Crear sala" / "Unirse a sala" / "Salir" with arrow-key navigation.
 
 import (
+	"math/rand/v2"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -35,6 +37,52 @@ const (
 	menuSubHost  = 2 // host-confirm sub-screen (shows public toggle)
 )
 
+// menuDealSteps is the total number of deal-animation ticks: one per card in
+// the fan (each lands face-down) plus a final tick that flips the last card.
+const menuDealSteps = 6
+
+// menuDealInterval is the delay between deal-animation ticks.
+const menuDealInterval = 120 * time.Millisecond
+
+// menuDealMsg advances the card-deal animation by one step.
+type menuDealMsg struct{}
+
+// menuDealTick schedules the next deal-animation step.
+func menuDealTick() tea.Cmd {
+	return tea.Tick(menuDealInterval, func(time.Time) tea.Msg { return menuDealMsg{} })
+}
+
+// menuShakeTickCount is the number of shake-animation ticks; odd ticks render
+// the card shifted one column left, so the shake ends back at rest.
+const menuShakeTickCount = 6
+
+// menuShakeInterval is the delay between shake-animation ticks.
+const menuShakeInterval = 70 * time.Millisecond
+
+// menuShakeMsg advances the card-shake animation by one step.
+type menuShakeMsg struct{}
+
+// menuShakeTick schedules the next shake-animation step.
+func menuShakeTick() tea.Cmd {
+	return tea.Tick(menuShakeInterval, func(time.Time) tea.Msg { return menuShakeMsg{} })
+}
+
+// startCardShake picks a random fan card and (re)starts the shake animation.
+// It returns the updated model and the tick command needed to drive the shake,
+// or nil when a shake chain is already running or the fan isn't fully dealt.
+func (m Model) startCardShake() (Model, tea.Cmd) {
+	if m.menuDeal < menuDealSteps {
+		return m, nil
+	}
+	alreadyRunning := m.menuShakeTicks > 0
+	m.menuShakeCard = rand.IntN(len(menuFanCards))
+	m.menuShakeTicks = menuShakeTickCount
+	if alreadyRunning {
+		return m, nil // the live tick chain keeps driving the new shake
+	}
+	return m, menuShakeTick()
+}
+
 // menuItemLabels are the display labels for the three main menu items.
 var menuItemLabels = [menuItemCount]string{
 	"Crear sala",
@@ -62,10 +110,12 @@ func (m Model) handleMenuMainKey(key string) (tea.Model, tea.Cmd) {
 		if m.menuCursor > 0 {
 			m.menuCursor--
 		}
+		return m.startCardShake()
 	case "down", "j":
 		if m.menuCursor < menuItemCount-1 {
 			m.menuCursor++
 		}
+		return m.startCardShake()
 	case "enter":
 		switch m.menuCursor {
 		case menuItemHost:
@@ -279,7 +329,7 @@ func (m Model) viewMenuMainPanel(showFan bool) string {
 
 	if showFan {
 		inner.WriteString("\n\n")
-		inner.WriteString(cardFanFooter())
+		inner.WriteString(cardFanFooter(m.menuDeal, m.menuShakeCard, m.menuShakeTicks))
 	}
 
 	inner.WriteString("\n\n")
