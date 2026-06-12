@@ -87,9 +87,6 @@ func isBG(c rgb, bg rgb, tol int) bool {
 
 // ─── Background removal & trim ────────────────────────────────────────────────
 
-// transparent sentinel
-const transparent = 255
-
 // pixelGrid is a W×H grid of rgb values; transparent pixels have alpha==transparent.
 type pixelGrid struct {
 	w, h int
@@ -797,7 +794,7 @@ func main() {
 		os.Exit(1)
 	}
 	img, _, err := image.Decode(f)
-	f.Close()
+	_ = f.Close()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "png2sprite: decode %s: %v\n", *flagIn, err)
 		os.Exit(1)

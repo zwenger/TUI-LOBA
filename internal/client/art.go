@@ -145,7 +145,7 @@ func RenderSprite(grid []string, palette map[rune]string) string {
 
 		var sb strings.Builder
 		for c := 0; c < maxCols; c++ {
-			var topRune, botRune rune = '.', '.'
+			topRune, botRune := '.', '.'
 			if c < len(topRunes) {
 				topRune = topRunes[c]
 			}
@@ -335,7 +335,7 @@ func renderWordmarkRow(topRow, botRow int) string {
 
 	var sb strings.Builder
 	for c := 0; c < maxCols; c++ {
-		var topPx, botPx rune = '.', '.'
+		topPx, botPx := '.', '.'
 		if c < len(top) {
 			topPx = top[c]
 		}
@@ -368,12 +368,6 @@ func renderLobaWordmark() string {
 		lines[i] = renderWordmarkRow(i*2, i*2+1)
 	}
 	return strings.Join(lines, "\n")
-}
-
-// wordmarkWidth returns the visible terminal width of the wordmark (number of
-// terminal columns it occupies).
-func wordmarkWidth() int {
-	return lipgloss.Width(renderWordmarkRow(0, 1))
 }
 
 // ─── Card fan footer ──────────────────────────────────────────────────────────
@@ -425,13 +419,4 @@ func cardFanFooter(dealt, shakeCard, shakeTicks int) string {
 		blocks[i] = padCardSlot(renderCardBox(c, false, false), shifted)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, blocks...)
-}
-
-// artBlockWidth returns the rendered visible width of the first line of an art constant.
-func artBlockWidth(art string) int {
-	lines := strings.Split(art, "\n")
-	if len(lines) == 0 {
-		return 0
-	}
-	return lipgloss.Width(lines[0])
 }

@@ -30,7 +30,6 @@ var (
 	styleJoker    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("201"))
 	styleActive   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226"))
 	styleDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	styleHelp     = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Italic(true)
 	styleErr      = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 	styleSel      = lipgloss.NewStyle().Background(lipgloss.Color("237")).Bold(true)
 	styleHeader   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213"))
@@ -1410,11 +1409,6 @@ func renderPlayerChip(p protocol.PlayerView, pos int) string {
 	return chip
 }
 
-// renderOpponentChip is a compatibility shim — delegates to renderPlayerChip.
-func renderOpponentChip(p protocol.PlayerView, pos int) string {
-	return renderPlayerChip(p, pos)
-}
-
 // wrapBadges lays out a slice of pre-rendered badge strings into rows using
 // lipgloss.JoinHorizontal, wrapping whole badges when the next one would exceed
 // termWidth. The gap between badges in a row is badgeGap spaces.
@@ -1755,14 +1749,11 @@ func renderRevealBlock(rph protocol.RevealedPlayerHand, termWidth int) string {
 		nameStr = styleBadgeName.Render(nameStr)
 	}
 
-	// Card strip with per-card value annotation.
+	// Card strip; per-card penalty values are shown via buildScoreBreakdown below.
 	var cardBlocks []string
-	var valueLabels []string
 	for _, cv := range rph.Cards {
 		c := cv
 		cardBlocks = append(cardBlocks, renderMiniCard(&c))
-		val := cardPenaltyValue(cv)
-		valueLabels = append(valueLabels, styleDim.Render(fmt.Sprintf("%2d", val)))
 	}
 
 	var cardStrip string
@@ -2270,18 +2261,6 @@ func applyCardColor(s string, rank, suit int, pickedUp bool) string {
 	default: // Spades and face-down/neutral
 		return styleSpades.Render(s)
 	}
-}
-
-// renderCardLabel renders a short inline card label (for melds, discard top, etc.)
-func renderCardLabel(c *protocol.CardView) string {
-	if c == nil {
-		return "?"
-	}
-	label := c.Label
-	if label == "" {
-		label = cardLabelFromView(*c)
-	}
-	return applyCardColor(label, c.Rank, c.Suit, false)
 }
 
 func cardLabelFromView(c protocol.CardView) string {

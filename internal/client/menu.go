@@ -18,10 +18,6 @@ const minArtWidth = 60
 // minArtHeight is the terminal height below which we skip the big art entirely.
 const minArtHeight = 24
 
-// sideBySideWidth is the terminal width at or above which title and wolf are
-// placed side-by-side (JoinHorizontal); below it they stack vertically.
-const sideBySideWidth = 90
-
 // Menu item indices.
 const (
 	menuItemHost = 0
