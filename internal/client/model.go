@@ -181,6 +181,10 @@ type Model struct {
 	selfID       string
 	publicAddr   string // tunnel public address, non-empty when host used --public
 
+	// lobby chat (waiting room, before the host starts the game)
+	lobbyChat      []string // received messages, newest last; entries may be multiline
+	lobbyChatInput string   // message being composed; may contain newlines (Ctrl+J / paste)
+
 	// seat picker (reconnect to a started game)
 	seats       []protocol.SeatEntry
 	seatCursor  int
@@ -464,16 +468,69 @@ func (m Model) handleEnvelope(env protocol.Envelope) (Model, tea.Cmd) {
 		if err := json.Unmarshal(env.Payload, &e); err == nil {
 			m.events = append(m.events, e["text"])
 			m.appendEventHistory(e["text"])
+			// Before the game starts, messages also feed the lobby chat box.
+			if m.state == nil {
+				m.lobbyChat = append(m.lobbyChat, e["text"])
+				if len(m.lobbyChat) > maxLobbyChatMessages {
+					m.lobbyChat = m.lobbyChat[len(m.lobbyChat)-maxLobbyChatMessages:]
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+// maxLobbyChatMessages caps the client-side lobby chat history.
+const maxLobbyChatMessages = 50
+
+// maxLobbyChatInput caps the composed chat message length in runes.
+const maxLobbyChatInput = 2000
+
+// handlePaste routes bracketed-paste text to whichever text input is focused.
+// Pasted text arrives as a single KeyMsg covering the whole paste, newlines
+// included, so multiline content (e.g. ASCII art) survives intact for chat.
+func (m Model) handlePaste(text string) (tea.Model, tea.Cmd) {
+	switch {
+	case m.screen == screenMenu && m.menuSubScreen == menuSubJoin:
+		// Addresses have no whitespace: keep printable ASCII only.
+		for _, r := range text {
+			if r > ' ' && r < 0x7f && len([]rune(m.menuAddrInput)) < 60 {
+				m.menuAddrInput += string(r)
+			}
+		}
+	case m.screen == screenName:
+		for _, r := range text {
+			if r >= ' ' && r != 0x7f && len([]rune(m.nameInput)) < 24 {
+				m.nameInput += string(r)
+			}
+		}
+	case m.screen == screenLobby:
+		text = strings.ReplaceAll(text, "\r\n", "\n")
+		text = strings.ReplaceAll(text, "\r", "\n")
+		text = strings.ReplaceAll(text, "\t", "    ")
+		if room := maxLobbyChatInput - len([]rune(m.lobbyChatInput)); room > 0 {
+			runes := []rune(text)
+			if len(runes) > room {
+				runes = runes[:room]
+			}
+			m.lobbyChatInput += string(runes)
 		}
 	}
 	return m, nil
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Bracketed paste arrives as one KeyMsg with Paste=true; route it to the
+	// focused text input instead of treating it as a (bracket-wrapped) key name.
+	if msg.Paste {
+		return m.handlePaste(string(msg.Runes))
+	}
+
 	key := msg.String()
 
-	// Global quit (q works on all screens except in-game where it conflicts with lay-off numbering).
-	if key == "ctrl+c" || (key == "q" && m.screen != screenGame && m.screen != screenMenu) {
+	// Global quit (q works on all screens except in-game, where it conflicts with
+	// lay-off numbering, and the menu/lobby, where q is typeable text).
+	if key == "ctrl+c" || (key == "q" && m.screen != screenGame && m.screen != screenMenu && m.screen != screenLobby) {
 		return m, tea.Quit
 	}
 
@@ -534,10 +591,36 @@ func (m Model) handleNameKey(key string) (tea.Model, tea.Cmd) {
 
 // ─── Lobby keys ───────────────────────────────────────────────────────────────
 
+// handleLobbyKey treats the lobby as a chat-focused screen: printable keys type
+// into the chat input, Enter sends, Ctrl+J adds a newline (multiline messages),
+// and the host starts the game with Ctrl+S (plain "s" is now typeable text).
 func (m Model) handleLobbyKey(key string) (tea.Model, tea.Cmd) {
-	if key == "s" || key == "enter" {
+	switch key {
+	case "ctrl+s":
 		if m.conn != nil {
 			_ = protocol.WriteJSON(m.conn, protocol.Command{Type: protocol.CmdStart})
+		}
+	case "enter":
+		text := strings.TrimRight(m.lobbyChatInput, " \n")
+		if text != "" && m.conn != nil {
+			_ = protocol.WriteJSON(m.conn, protocol.Command{Type: protocol.CmdChat, Text: text})
+		}
+		m.lobbyChatInput = ""
+	case "ctrl+j":
+		if len([]rune(m.lobbyChatInput)) < maxLobbyChatInput {
+			m.lobbyChatInput += "\n"
+		}
+	case "backspace":
+		if len(m.lobbyChatInput) > 0 {
+			runes := []rune(m.lobbyChatInput)
+			m.lobbyChatInput = string(runes[:len(runes)-1])
+		}
+	default:
+		// Single printable rune (covers accented characters) types into the chat.
+		runes := []rune(key)
+		if len(runes) == 1 && runes[0] >= ' ' && runes[0] != 0x7f &&
+			len([]rune(m.lobbyChatInput)) < maxLobbyChatInput {
+			m.lobbyChatInput += key
 		}
 	}
 	return m, nil
@@ -996,21 +1079,55 @@ func (m Model) viewLobby() string {
 
 	players := strings.Join(m.lobbyPlayers, "\n  ")
 	hostHint := "  Anfitrión: presioná " +
-		styleHelpKey.Render("S") + " " + styleHelpDesc.Render("o") + " " +
-		styleHelpKey.Render("Enter") + " " + styleHelpDesc.Render("para comenzar")
+		styleHelpKey.Render("Ctrl+S") + " " + styleHelpDesc.Render("para comenzar")
 	content := fmt.Sprintf("  Jugadores conectados (%d/6):\n  %s\n\n%s",
 		len(m.lobbyPlayers),
 		players,
 		hostHint,
 	)
 	b.WriteString(styleBox.Render(content))
+	b.WriteString("\n")
+
+	// ── Chat box ──
+	var chat strings.Builder
+	chat.WriteString(stylePanelTitle.Render("Chat") + "\n")
+	if len(m.lobbyChat) == 0 {
+		chat.WriteString(styleDim.Render("(no hay mensajes todavía)") + "\n")
+	} else {
+		// Flatten multiline messages and show the last N rendered lines.
+		var lines []string
+		for _, msg := range m.lobbyChat {
+			lines = append(lines, strings.Split(msg, "\n")...)
+		}
+		if len(lines) > maxLobbyChatLines {
+			lines = lines[len(lines)-maxLobbyChatLines:]
+		}
+		chat.WriteString(strings.Join(lines, "\n") + "\n")
+	}
+	chat.WriteString("\n")
+	chat.WriteString(styleInput.Render(m.lobbyChatInput + "█"))
+	// Fixed full-terminal width so the box doesn't resize with message length.
+	chatBox := styleBox
+	if m.width > 4 {
+		chatBox = chatBox.Width(m.width - 2) // -2 for the border columns
+	}
+	b.WriteString(chatBox.Render(chat.String()))
 
 	if m.lastError != "" {
 		b.WriteString("\n" + styleErr.Render(m.lastError))
 	}
-	b.WriteString("\n\n" + styleHelpDesc.Render("Esperando que el anfitrión inicie la partida..."))
+	b.WriteString("\n" + helpBar(
+		helpEntry{"Enter", "enviar"},
+		helpEntry{"Ctrl+J", "nueva línea"},
+		helpEntry{"Ctrl+S", "comenzar (anfitrión)"},
+		helpEntry{"Ctrl+C", "salir"},
+	))
+	b.WriteString("\n" + styleHelpDesc.Render("Esperando que el anfitrión inicie la partida..."))
 	return b.String()
 }
+
+// maxLobbyChatLines caps how many rendered chat lines the lobby shows at once.
+const maxLobbyChatLines = 12
 
 // ─── Seat picker view ─────────────────────────────────────────────────────────
 

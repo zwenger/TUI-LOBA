@@ -769,7 +769,17 @@ func (s *Server) broadcastStateLocked() {
 	}
 }
 
+// maxChatTextLen caps a single chat message (in bytes) to keep envelopes sane.
+const maxChatTextLen = 4000
+
 func (s *Server) broadcastChatLocked(senderID, text string) {
+	text = strings.TrimRight(text, " \n")
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	if len(text) > maxChatTextLen {
+		text = text[:maxChatTextLen]
+	}
 	name := senderID
 	if s.game != nil {
 		if p := s.game.PlayerByID(senderID); p != nil {
